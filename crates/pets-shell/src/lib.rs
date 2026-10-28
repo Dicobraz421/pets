@@ -10,6 +10,11 @@ mod sys;
 
 pub use logging::{fatal, init_logging};
 
+/// Платформенный код приложений без UI (решение владельца 2026-10-28): реестр, учётные данные, стандартные потоки
+/// процесса без консоли, разбивка памяти для бенча. Только Windows; `unsafe` — внутри (`sys`).
+#[cfg(windows)]
+pub use sys::{console, credentials, memory, registry};
+
 /// Ошибка оболочки процесса.
 #[derive(Debug, thiserror::Error)]
 pub enum ShellError {
@@ -29,6 +34,9 @@ pub enum ShellError {
     Nul,
     #[error("сообщение не UTF-8")]
     NotUtf8,
+    /// Данные не годятся для вызова ОС (длина, кодировка); сами данные (секрет) в ошибку не попадают.
+    #[error("{what}: {reason}")]
+    Invalid { what: &'static str, reason: &'static str },
 }
 
 /// Итог проверки единственного экземпляра.

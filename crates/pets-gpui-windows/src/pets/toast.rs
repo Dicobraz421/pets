@@ -9,7 +9,9 @@ use windows::Data::Xml::Dom::XmlDocument;
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
 use windows::core::HSTRING;
 
-use super::{com_error, registry};
+use windows_registry::CURRENT_USER;
+
+use super::com_error;
 
 /// От чьего имени уведомление.
 pub struct Sender<'a> {
@@ -24,10 +26,15 @@ pub struct Sender<'a> {
 /// Показать уведомление: заголовок и текст.
 pub fn show(sender: &Sender<'_>, title: &str, body: &str) -> io::Result<()> {
     let key = format!(r"Software\Classes\AppUserModelId\{}", sender.aumid);
-    registry::set_string(&key, Some("DisplayName"), sender.name)?;
-    if let Some(icon) = sender.icon.filter(|p| p.exists()) {
-        registry::set_string(&key, Some("IconUri"), &icon.display().to_string())?;
-    }
+    let register = || -> windows::core::Result<()> {
+        let key = CURRENT_USER.create(&key)?;
+        key.set_string("DisplayName", sender.name)?;
+        if let Some(icon) = sender.icon.filter(|p| p.exists()) {
+            key.set_string("IconUri", icon.display().to_string())?;
+        }
+        Ok(())
+    };
+    register().map_err(|e| com_error("AppUserModelId", e))?;
     let xml = document(title, body);
     let run = || -> windows::core::Result<()> {
         let doc = XmlDocument::new()?;

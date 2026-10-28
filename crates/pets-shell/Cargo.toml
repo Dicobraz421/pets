@@ -1,6 +1,6 @@
 [package]
 name = "pets-shell"
-description = "Жизненный цикл процесса приложения Pets: журнал, паники, фатальные ошибки, единственный экземпляр — без UI"
+description = "Жизненный цикл процесса приложения Pets: журнал, паники, фатальные ошибки, единственный экземпляр, реестр, учётные данные — без UI"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -14,11 +14,17 @@ tracing-subscriber = { workspace = true, features = ["registry"] }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { workspace = true, features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Security",
+    "Win32_Security_Credentials",
     "Win32_Storage_FileSystem",
+    "Win32_System_Console",
     "Win32_System_EventLog",
     "Win32_System_IO",
+    "Win32_System_Memory",
     "Win32_System_Pipes",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Registry",
     "Win32_System_RemoteDesktop",
     "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
