@@ -83,7 +83,7 @@ jobs:
           shared-key: gpui-windows
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Тесты наших правок
-        run: cargo test --manifest-path crates/pets-gpui-windows/Cargo.toml --lib --features test-support -- vsync force_warp lazy_path image_sprite background
+        run: cargo test --manifest-path crates/pets-gpui-windows/Cargo.toml --lib --features test-support -- vsync force_warp lazy_path image_sprite background pets::
 
   gate:
     needs: [changes, test, gpui-windows]

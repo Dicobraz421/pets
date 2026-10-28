@@ -12,6 +12,8 @@ mod dispatcher;
 mod display;
 mod events;
 mod keyboard;
+/// Pets patch: платформенный код приложений Pets за нейтральным API.
+pub mod pets;
 mod platform;
 mod system_notifications;
 mod system_settings;
