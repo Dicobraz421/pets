@@ -155,7 +155,7 @@ pub fn report() -> (String, usize) {
 mod tests {
     /// Частный рабочий набор посчитан, категории — в отчёте.
     #[test]
-    fn pets_memory_map_is_reported() {
+    fn memory_map_is_reported() {
         let (text, private_ws) = super::report();
         assert!(private_ws > 0, "{text}");
         for line in ["mem image:", "mem mapped:", "mem private:", "mem total:"] {

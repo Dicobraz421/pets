@@ -5,7 +5,6 @@
 //! (`AttachConsole(ATTACH_PARENT_PROCESS)`, затем `CONOUT$`); нет консоли у родителя (Проводник) — ничего.
 //! [`stderr_to_file`] — журнал: поток ошибок — в файл.
 
-use std::io;
 use std::os::windows::io::IntoRawHandle as _;
 use std::path::Path;
 
@@ -18,7 +17,8 @@ use windows_sys::Win32::System::Console::{
     ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
 };
 
-use super::{last_error, wide};
+use super::{last_os, to_wide};
+use crate::ShellError;
 
 /// Описатель, в который можно писать: файл, канал или консоль.
 fn usable(h: HANDLE) -> bool {
@@ -38,7 +38,7 @@ pub fn attach_parent() {
     if unsafe { AttachConsole(ATTACH_PARENT_PROCESS) } == 0 {
         return;
     }
-    let conout = wide("CONOUT$");
+    let conout = to_wide("CONOUT$");
     for (stream, old) in STREAMS.into_iter().zip(before) {
         if usable(old) {
             // Перенаправленный поток: AttachConsole мог заменить его консолью — вернуть.
@@ -71,21 +71,31 @@ pub fn attach_parent() {
 
 /// Процесс без консоли: поток ошибок — в конец файла `path` (туда пишет `tracing` в stderr). Поток ошибок уже есть
 /// (консоль, перенаправление) — ничего, `Ok(false)`. `Ok(true)` — журнал пишется в файл.
-pub fn stderr_to_file(path: &Path) -> io::Result<bool> {
+pub fn stderr_to_file(path: &Path) -> Result<bool, ShellError> {
     // SAFETY: без аргументов-указателей; описатель не закрываем.
     let current = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
     if !current.is_null() && current != INVALID_HANDLE_VALUE {
         return Ok(false);
     }
     if let Some(dir) = path.parent() {
-        std::fs::create_dir_all(dir)?;
+        std::fs::create_dir_all(dir).map_err(|source| ShellError::Os {
+            what: "log directory",
+            source,
+        })?;
     }
-    let file = std::fs::OpenOptions::new().create(true).append(true).open(path)?;
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(path)
+        .map_err(|source| ShellError::Os {
+            what: "log file",
+            source,
+        })?;
     let handle = file.into_raw_handle();
     // SAFETY: описатель файла живёт до конца процесса (не закрывается); Rust читает стандартный поток при каждой
     // записи в stderr.
     if unsafe { SetStdHandle(STD_ERROR_HANDLE, handle) } == 0 {
-        Err(last_error("SetStdHandle"))
+        Err(last_os("SetStdHandle"))
     } else {
         Ok(true)
     }
@@ -101,7 +111,7 @@ pub fn active_code_page() -> u32 {
 mod tests {
     /// Тест идёт с потоками nextest/cargo: они есть — ни консоль, ни файл не подключаются.
     #[test]
-    fn pets_console_keeps_existing_streams() {
+    fn console_keeps_existing_streams() {
         let path = std::env::temp_dir().join(format!("pets-console-test-{}.log", std::process::id()));
         assert!(!super::stderr_to_file(&path).unwrap());
         assert!(!path.exists());
