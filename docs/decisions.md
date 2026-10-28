@@ -2,6 +2,19 @@
 
 Новое решение — сверху, с датой.
 
+## 2026-10-28. Платформенный код приложений — в pets-gpui-windows (Postman, T1-18)
+
+Решение владельца: «всё платформозависимое уноси в выделенные модули» → `pets-gpui-windows`. Приложение не держит
+`windows`/`windows-sys` и `unsafe` для окна и оболочки ОС. Модуль `gpui_windows::pets` (Pets patch, API добавлено,
+прежнее не менялось; ошибки — `std::io::Error`):
+- `drag`: `DragFile::bytes(name, Arc<Vec<u8>>)` / `DragFile::lazy(name, size, provider)` / `.with_copy(path)`,
+  `drag_out(files) -> Outcome { Dropped, Cancelled }` (OLE: виртуальные файлы + запасной `CF_HDROP`), `threshold(scale)`,
+  `TempCopies::new(app)` (`%TEMP%\<app>\drag`: `slot`, `clean`). Что тащить и как писать копию — решает приложение.
+- `window`: `id(&Window)`, `set_icons(&Window, resource)`, `icon_sizes(resource)`, `capture(id) -> Image`.
+- `toast::show(&Sender { aumid, name, icon }, title, body)` — без AUMID процесса (группировка на панели задач прежняя).
+- `registry` (HKCU запись, HKCU/HKLM чтение), `credentials` (диспетчер учётных данных), `console` (`attach_parent`,
+  `stderr_to_file`, `active_code_page`), `memory::report` (бенч).
+
 ## 2026-10-21. pets-commands: схемы клавиш (Postman S5-17)
 
 Несколько наборов сочетаний у одной таблицы команд — «как Outlook» по умолчанию и «одиночные клавиши как Gmail».
