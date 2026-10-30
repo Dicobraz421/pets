@@ -19,6 +19,8 @@ pub mod credentials;
 pub mod memory;
 #[cfg(windows)]
 pub mod registry;
+#[cfg(windows)]
+pub mod volume;
 
 /// Строка UTF-16 с нулём в конце — для `PCWSTR`.
 #[cfg(windows)]
