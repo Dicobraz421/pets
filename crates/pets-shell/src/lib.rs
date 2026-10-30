@@ -11,9 +11,10 @@ mod sys;
 pub use logging::{fatal, init_logging};
 
 /// Платформенный код приложений без UI (решение владельца 2026-10-28): реестр, учётные данные, стандартные потоки
-/// процесса без консоли, разбивка памяти для бенча. Только Windows; `unsafe` — внутри (`sys`).
+/// процесса без консоли, разбивка памяти для бенча, шифрование тома BitLocker. Только Windows; `unsafe` — внутри
+/// (`sys`).
 #[cfg(windows)]
-pub use sys::{console, credentials, memory, registry};
+pub use sys::{console, credentials, memory, registry, volume};
 
 /// Ошибка оболочки процесса.
 #[derive(Debug, thiserror::Error)]
