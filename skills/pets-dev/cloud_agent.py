@@ -7,7 +7,7 @@ python cloud_agent.py say <session> <текст> # следующее сообщ
 Нужен CLI `ant` (`ant auth login`). Агент и окружение — PETS_AGENT_ID, PETS_AGENT_ENV.
 Токен GitHub для клона и push — PETS_AGENT_GH_TOKEN, иначе `gh auth token`; в песочницу
 он не попадает (git-прокси Anthropic). Агент пушит ветку w/<полоса>-<NN>, PR открывает
-оркестратор: `gh pr create --head w/<полоса>-<NN>` → `gh pr merge --auto --rebase`.
+оркестратор: `gh pr create --head w/<полоса>-<NN>` → `gh pr merge --auto`.
 """
 
 import argparse
