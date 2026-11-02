@@ -1,6 +1,8 @@
 //! Стенд: чёрный кадр на старте окна. Windows Graphics Capture снимает само окно процесса (не экран:
 //! перекрытие другими окнами не мешает, чужого на снимке нет) с момента, как его можно захватить;
-//! для каждого кадра — доля почти чёрных пикселей и средний цвет. Ввода не делает, только смотрит.
+//! для каждого кадра — доля почти чёрных пикселей, средний цвет и скрыто ли окно DWM в момент, когда DWM
+//! составил кадр (`SystemRelativeTime` против хронологии `DWMWA_CLOAKED`; признак в момент обработки кадра
+//! опаздывает и выдаёт последний скрытый кадр за видимый). Ввода не делает, только смотрит.
 //!
 //! `start-probe [--seconds 90] [--after 3] [--out frames.csv] [--dump dir] -- <exe> [args...]`
 
@@ -22,6 +24,7 @@ use windows::Win32::System::WinRT::Direct3D11::{
     CreateDirect3D11DeviceFromDXGIDevice, IDirect3DDxgiInterfaceAccess,
 };
 use windows::Win32::System::WinRT::Graphics::Capture::IGraphicsCaptureItemInterop;
+use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows::Win32::System::WinRT::{RO_INIT_MULTITHREADED, RoInitialize};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -58,6 +61,16 @@ fn window_of(pid: u32) -> Option<HWND> {
         let _ = EnumWindows(Some(each), LPARAM(&raw mut acc as isize));
     }
     acc.best.map(|(h, _)| h)
+}
+
+/// Время QPC в единицах 100 нс — как `SystemRelativeTime` кадра захвата.
+fn now_100ns() -> i64 {
+    let (mut c, mut f) = (0i64, 0i64);
+    unsafe {
+        let _ = QueryPerformanceCounter(&mut c);
+        let _ = QueryPerformanceFrequency(&mut f);
+    }
+    (c as i128 * 10_000_000 / f as i128) as i64
 }
 
 fn cloaked(h: HWND) -> bool {
@@ -122,6 +135,24 @@ fn main() -> windows::core::Result<()> {
     let _ = session.SetIsCursorCaptureEnabled(false);
     session.StartCapture()?;
     rows.push(format!("{:.1},capture-started,{},,,,,,", ms(), cloaked(hwnd) as u8));
+    // Хронология скрытия: признак в момент кадра — по времени его составления DWM, а не обработки здесь.
+    let timeline = std::sync::Arc::new(std::sync::Mutex::new(vec![(now_100ns(), cloaked(hwnd))]));
+    let tl = timeline.clone();
+    let hw = hwnd.0 as isize;
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let dn = done.clone();
+    let poller = std::thread::spawn(move || {
+        let h = HWND(hw as *mut _);
+        while !dn.load(std::sync::atomic::Ordering::Relaxed) {
+            let c = cloaked(h);
+            let mut v = tl.lock().unwrap();
+            if v.last().is_none_or(|l| l.1 != c) {
+                v.push((now_100ns(), c));
+            }
+            drop(v);
+            std::thread::sleep(Duration::from_micros(200));
+        }
+    });
 
     let stop = t0.elapsed() + Duration::from_secs_f64(after);
     let (mut frames, mut black, mut dumped) = (0u32, 0u32, 0u32);
@@ -131,6 +162,8 @@ fn main() -> windows::core::Result<()> {
             continue;
         };
         let cs = frame.ContentSize()?;
+        let at = frame.SystemRelativeTime()?.Duration;
+        let hidden_at = timeline.lock().unwrap().iter().rev().find(|e| e.0 <= at).is_none_or(|e| e.1);
         let access: IDirect3DDxgiInterfaceAccess = frame.Surface()?.cast()?;
         let tex: ID3D11Texture2D = unsafe { access.GetInterface()? };
         let mut desc = D3D11_TEXTURE2D_DESC::default();
@@ -143,10 +176,13 @@ fn main() -> windows::core::Result<()> {
             dumped += 1;
         }
         frames += 1;
-        if pct >= 50.0 {
+        if pct >= 50.0 && !hidden_at {
             black += 1;
         }
-        rows.push(format!("{:.1},frame,{},{pct:.1},{},{},{},{w},{h}", ms(), cloaked(hwnd) as u8, mean[0], mean[1], mean[2]));
+        if pct >= 50.0 && !hidden_at {
+            eprintln!("ЧЁРНЫЙ видимый кадр: {:.1} мс", ms());
+        }
+        rows.push(format!("{:.1},frame,{},{pct:.1},{},{},{},{w},{h}", ms(), hidden_at as u8, mean[0], mean[1], mean[2]));
         frame.Close()?;
         if cs.Width != size.Width || cs.Height != size.Height {
             size = cs;
@@ -154,11 +190,17 @@ fn main() -> windows::core::Result<()> {
         }
     }
     session.Close()?;
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = poller.join();
+    for (t, c) in timeline.lock().unwrap().iter() {
+        let _ = t;
+        rows.push(format!(",cloak-change,{},,,,,,", *c as u8));
+    }
     let _ = child.kill();
     if let Some(p) = out_csv {
         let _ = std::fs::write(p, rows.join("\n"));
     }
-    println!("frames={frames} black={black}");
+    println!("frames={frames} black_visible={black}");
     Ok(())
 }
 
