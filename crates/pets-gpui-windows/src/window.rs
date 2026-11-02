@@ -1078,8 +1078,10 @@ impl PlatformWindow for WindowsWindow {
             .borrow_mut()
             .draw(scene, background_appearance)
             .log_err();
-        // Pets patch: первый кадр на месте — окно показывается уже с картинкой.
+        // Pets patch: первый кадр дошёл до DWM — окно показывается уже с картинкой. Сразу после
+        // Present рано: DWM успевает составить кадр без нашего (чёрный на один vsync).
         if self.state.cloaked.replace(false) {
+            self.state.renderer.borrow().wait_frame_composed();
             set_cloak(self.0.hwnd, false);
         }
     }
