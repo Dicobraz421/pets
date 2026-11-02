@@ -103,6 +103,7 @@ fn main() -> windows::core::Result<()> {
     let interop = windows::core::factory::<GraphicsCaptureItem, IGraphicsCaptureItemInterop>()?;
 
     let t0 = Instant::now();
+    let t0_100ns = now_100ns();
     let mut child = std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn().expect("запуск");
     let pid = child.id();
     let ms = || t0.elapsed().as_secs_f64() * 1000.0;
@@ -192,9 +193,9 @@ fn main() -> windows::core::Result<()> {
     session.Close()?;
     done.store(true, std::sync::atomic::Ordering::Relaxed);
     let _ = poller.join();
+    // Время смены — в мс от запуска, как у кадров: видно, какой кадр составлен до показа окна и какой после.
     for (t, c) in timeline.lock().unwrap().iter() {
-        let _ = t;
-        rows.push(format!(",cloak-change,{},,,,,,", *c as u8));
+        rows.push(format!("{:.1},cloak-change,{},,,,,,", (t - t0_100ns) as f64 / 10_000.0, *c as u8));
     }
     let _ = child.kill();
     if let Some(p) = out_csv {
