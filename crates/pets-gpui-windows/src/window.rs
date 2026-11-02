@@ -52,6 +52,8 @@ pub struct WindowsWindowState {
     pub background_appearance: Cell<WindowBackgroundAppearance>,
     pub scale_factor: Cell<f32>,
     pub restore_from_minimized: Cell<Option<Box<dyn FnMut(RequestFrameOptions)>>>,
+    /// Pets patch: окно скрыто DWM (cloak) до первого кадра — без чёрной вспышки на старте.
+    pub cloaked: Cell<bool>,
 
     pub callbacks: Callbacks,
     pub frame_signal: Arc<PlatformFrameSignal>,
@@ -174,6 +176,7 @@ impl WindowsWindowState {
             background_appearance: Cell::new(WindowBackgroundAppearance::Opaque),
             scale_factor: Cell::new(scale_factor),
             restore_from_minimized: Cell::new(restore_from_minimized),
+            cloaked: Cell::new(false),
             min_size,
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
@@ -580,6 +583,11 @@ impl WindowsWindow {
         let this = this.unwrap();
 
         register_drag_drop(&this)?;
+        // Pets patch: до первого кадра окно скрыто DWM — иначе виден фон класса (чёрный)
+        // ~100 мс, пока не готов первый Present (Урфин). Снимается в `draw`.
+        if set_cloak(hwnd, true) {
+            this.state.cloaked.set(true);
+        }
         set_non_rude_hwnd(hwnd, true);
         configure_dwm_dark_mode(hwnd, appearance);
         this.state.border_offset.update(hwnd)?;
@@ -1070,6 +1078,10 @@ impl PlatformWindow for WindowsWindow {
             .borrow_mut()
             .draw(scene, background_appearance)
             .log_err();
+        // Pets patch: первый кадр на месте — окно показывается уже с картинкой.
+        if self.state.cloaked.replace(false) {
+            set_cloak(self.0.hwnd, false);
+        }
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -1833,4 +1845,19 @@ mod tests {
             1
         );
     }
+}
+
+/// Pets patch: скрыть или показать окно через DWM (`DWMWA_CLOAK`), не трогая видимость окна.
+fn set_cloak(hwnd: HWND, on: bool) -> bool {
+    let value = BOOL::from(on);
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_CLOAK,
+            &value as *const _ as *const _,
+            std::mem::size_of::<BOOL>() as u32,
+        )
+    }
+    .log_err()
+    .is_some()
 }
