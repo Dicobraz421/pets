@@ -107,6 +107,7 @@ impl WindowsWindowInner {
             WM_DISPLAYCHANGE => self.handle_display_change_msg(handle),
             WM_NCHITTEST => self.handle_hit_test_msg(handle, lparam),
             WM_PAINT => self.handle_paint_msg(handle),
+            WM_ERASEBKGND => self.handle_erase_background_msg(handle, wparam),
             WM_CLOSE => self.handle_close_msg(),
             WM_DESTROY => self.handle_destroy_msg(handle),
             WM_MOUSEMOVE => self.handle_mouse_move_msg(handle, lparam, wparam),
@@ -325,6 +326,22 @@ impl WindowsWindowInner {
 
     fn handle_paint_msg(&self, handle: HWND) -> Option<isize> {
         self.draw_window(handle, false)
+    }
+
+    /// Pets patch: a live edge drag sends `WM_ERASEBKGND` synchronously from `SetWindowPos`, and the
+    /// area it exposes shows the erased background until the swap chain presents the new size. The
+    /// class brush is black (no white flash before the first frame); after it, fill with the frame's
+    /// own background so the gap is the app's color in light and dark themes.
+    fn handle_erase_background_msg(&self, handle: HWND, wparam: WPARAM) -> Option<isize> {
+        let color = self.state.background_color.get()?;
+        let hdc = HDC(wparam.0 as _);
+        let mut rect = RECT::default();
+        unsafe {
+            GetClientRect(handle, &mut rect).ok()?;
+            SetDCBrushColor(hdc, color);
+            FillRect(hdc, &rect, HBRUSH(GetStockObject(DC_BRUSH).0));
+        }
+        Some(1)
     }
 
     fn handle_close_msg(&self) -> Option<isize> {

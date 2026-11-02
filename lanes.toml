@@ -1,0 +1,32 @@
+# Полосы pets (скилл pets-dev). Glob fnmatch (* включает /), первое совпадение сверху вниз.
+# Правка файла — класс B.
+
+[common]
+paths = ["docs/tasks/*", "docs/decisions/*"]
+
+[lane.commands]
+paths = ["crates/pets-commands/*"]
+
+[lane.i18n]
+paths = ["crates/pets-i18n/*"]
+
+[lane.shell]
+paths = ["crates/pets-shell/*"]
+
+[lane.ui]
+paths = ["crates/pets-ui/*"]
+
+[lane.gpui-windows]
+paths = ["crates/pets-gpui-windows/*"]
+
+[lane.skills]
+paths = ["skills/*"]
+
+[lane.docs]
+paths = ["docs/*", "*.md"]
+
+[lane.deps]
+paths = ["Cargo.toml", "Cargo.lock", "rust-toolchain.toml", "clippy.toml", "rustfmt.toml"]
+
+[lane.ci]
+paths = [".github/*", "scripts/*", "lanes.toml", ".gitignore", "LICENSE-*"]

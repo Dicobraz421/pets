@@ -1,0 +1,155 @@
+# Шаблон CI приложения Pets (скилл pets-dev). Подставить <app>, <bin>, шаги release.
+# PR и merge queue: ≤7 мин (fmt+lanes на ubuntu параллельно с clippy+nextest на Windows).
+# Docs-PR: сборка пропускается. Release/размер/smoke/архив/подпись — только main и теги `v*`;
+# тег `v*` — выпуск на GitHub (job `publish`, схема — references/releases.md).
+# Required check в защите main — один: `gate`.
+name: CI
+
+on:
+  pull_request:
+  merge_group:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.d.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: d
+        name: Что изменилось
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ -z "$BASE" ]; then echo rust=true >> "$GITHUB_OUTPUT"; exit 0; fi
+          git diff --name-only "$BASE" HEAD > changed.txt
+          # Полосы: PR правит одну полосу (x/* — межполосный PR класса B).
+          if [ -f lanes.toml ] && [ "$EVENT" = pull_request ]; then
+            python3 .github/lane_check.py lanes.toml changed.txt "$HEAD_REF"
+          fi
+          if grep -qvE '^(docs/|[^/]*\.md$|.*/README\.md$)' changed.txt; then
+            echo rust=true >> "$GITHUB_OUTPUT"
+          else
+            echo rust=false >> "$GITHUB_OUTPUT"
+          fi
+
+  fmt:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install --profile minimal -c rustfmt && cargo fmt --all --check
+
+  test:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install --profile minimal -c clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo nextest run --workspace --locked --profile ci
+      - run: cargo test --doc --workspace --locked
+
+  # Только main и теги `v*`. Сюда — release, размер, smoke, архив, подпись, артефакт. Платформа — строка matrix.
+  release:
+    needs: [changes, test]
+    if: >-
+      always() && needs.test.result != 'failure' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    strategy:
+      matrix:
+        include:
+          - platform: windows-x64
+            runner: windows-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install --profile minimal
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows-release
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - run: cargo build --release --locked -p <app>
+      # - run: python ci/size.py target/release/<bin>.exe <MiB>
+      # - run: target/release/<bin>.exe --smoke
+      # Упаковка платформы: выходы name, dir, assets (архив + компоненты), version — references/releases.md.
+      # - id: package
+      #   run: ./scripts/windows/package.ps1 -Out dist
+      # - if: github.ref_type == 'tag' && format('v{0}', steps.package.outputs.version) != github.ref_name
+      #   run: exit 1   # тег ≠ версия из Cargo.toml
+      - uses: actions/upload-artifact@v4
+        with:
+          name: <app>-${{ matrix.platform }}
+          path: target/release/<bin>.exe
+      # - if: github.ref_type == 'tag'
+      #   uses: actions/upload-artifact@v4
+      #   with: { name: 'release-${{ matrix.platform }}', path: '${{ steps.package.outputs.assets }}' }
+
+  # Выпуск на GitHub по тегу `v*`: файлы всех платформ плоско + SHA256SUMS.txt; версия с дефисом — пререлиз.
+  publish:
+    needs: [test, release]
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: .github/release-notes.md
+          sparse-checkout-cone-mode: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: release-*
+          path: assets
+          merge-multiple: true
+      - shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          (cd assets && sha256sum * > SHA256SUMS.txt)
+          version="${GITHUB_REF_NAME#v}"
+          sed "s/{version}/$version/g" .github/release-notes.md > notes.md
+          pre=(); case "$version" in *-*) pre=(--prerelease);; esac
+          gh release create "$GITHUB_REF_NAME" assets/* -R "$GITHUB_REPOSITORY" --verify-tag \
+            --title "<App> $version" --notes-file notes.md --generate-notes "${pre[@]}"
+
+  # Единственный required check: зелёный, если всё нужное прошло или было пропущено.
+  gate:
+    needs: [changes, fmt, test]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        run: |
+          r='${{ join(needs.*.result, ' ') }}'
+          echo "$r"
+          case " $r " in *" failure "*|*" cancelled "*) exit 1;; esac

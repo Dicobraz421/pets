@@ -79,6 +79,9 @@ pub struct WindowsWindowState {
     pub force_render_pending: Cell<bool>,
     /// Inside the modal move/size loop (between `WM_ENTERSIZEMOVE` and `WM_EXITSIZEMOVE`) — Postman patch.
     pub in_size_move: Cell<bool>,
+    /// Background of the last drawn frame (Pets patch): `WM_ERASEBKGND` fills the area a live resize
+    /// exposes with it instead of the black class brush. `None` until the first frame.
+    pub background_color: Cell<Option<COLORREF>>,
 
     pub click_state: ClickState,
     pub current_cursor: Cell<Option<HCURSOR>>,
@@ -188,6 +191,7 @@ impl WindowsWindowState {
             renderer: RefCell::new(renderer),
             force_render_pending: Cell::new(false),
             in_size_move: Cell::new(false),
+            background_color: Cell::new(None),
             click_state,
             current_cursor: Cell::new(current_cursor),
             cursor_visible,
@@ -1059,10 +1063,20 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn draw(&self, scene: &Scene) {
+        let background_appearance = self.state.background_appearance.get();
+        if background_appearance == WindowBackgroundAppearance::Opaque {
+            let size = self.state.logical_size.get();
+            let size = size.scale(self.state.scale_factor.get());
+            if let Some(color) = window_background_color(&scene.quads, size) {
+                self.state.background_color.set(Some(color));
+            }
+        } else {
+            self.state.background_color.set(None);
+        }
         self.state
             .renderer
             .borrow_mut()
-            .draw(scene, self.state.background_appearance.get())
+            .draw(scene, background_appearance)
             .log_err();
         // Pets patch: первый кадр на месте — окно показывается уже с картинкой.
         if self.state.cloaked.replace(false) {
@@ -1712,11 +1726,76 @@ fn set_non_rude_hwnd(hwnd: HWND, non_rude: bool) {
     }
 }
 
+/// Pets patch: the window background of a frame — the solid opaque quad painted first that covers
+/// the whole window (the root view's `bg`). Quads are sorted by draw order, so it is usually the
+/// first one. `None` when nothing covers the window: the previous color stays.
+fn window_background_color(quads: &[Quad], size: Size<ScaledPixels>) -> Option<COLORREF> {
+    let covers = |bounds: &Bounds<ScaledPixels>| {
+        let (origin, end) = (bounds.origin, bounds.bottom_right());
+        origin.x.0 <= 0.5
+            && origin.y.0 <= 0.5
+            && end.x.0 >= size.width.0 - 0.5
+            && end.y.0 >= size.height.0 - 0.5
+    };
+    quads.iter().find_map(|quad| {
+        let color = quad.background.as_solid()?;
+        if color.a < 0.999 || !covers(&quad.bounds) || !covers(&quad.content_mask.bounds) {
+            return None;
+        }
+        let Rgba { r, g, b, .. } = color.into();
+        let channel = |c: f32| (c.clamp(0.0, 1.0) * 255.0).round() as u32;
+        Some(COLORREF(channel(r) | channel(g) << 8 | channel(b) << 16))
+    })
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ClickState;
-    use gpui::{DevicePixels, MouseButton, point};
+    use super::{ClickState, window_background_color};
+    use gpui::{
+        Bounds, ContentMask, DevicePixels, MouseButton, Quad, ScaledPixels, point, rgb, size,
+        solid_background,
+    };
     use std::time::Duration;
+    use windows::Win32::Foundation::COLORREF;
+
+    fn quad(x: f32, y: f32, w: f32, h: f32, color: u32) -> Quad {
+        let bounds = Bounds::new(
+            point(ScaledPixels(x), ScaledPixels(y)),
+            size(ScaledPixels(w), ScaledPixels(h)),
+        );
+        Quad {
+            bounds,
+            content_mask: ContentMask { bounds },
+            background: solid_background(rgb(color)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn background_is_first_quad_covering_window() {
+        let window = size(ScaledPixels(800.0), ScaledPixels(600.0));
+        let quads = [
+            quad(10.0, 10.0, 100.0, 100.0, 0xff0000),
+            quad(0.0, 0.0, 800.0, 600.0, 0x202124),
+            quad(0.0, 0.0, 800.0, 600.0, 0xffffff),
+        ];
+        // COLORREF is 0x00BBGGRR.
+        assert_eq!(
+            window_background_color(&quads, window),
+            Some(COLORREF(0x242120))
+        );
+    }
+
+    #[test]
+    fn no_background_without_covering_opaque_quad() {
+        let window = size(ScaledPixels(800.0), ScaledPixels(600.0));
+        let mut clipped = quad(0.0, 0.0, 800.0, 600.0, 0x202124);
+        clipped.content_mask.bounds.size.width = ScaledPixels(400.0);
+        let mut translucent = quad(0.0, 0.0, 800.0, 600.0, 0x202124);
+        translucent.background = translucent.background.opacity(0.5);
+        let quads = [quad(0.0, 0.0, 799.0, 600.0, 0x202124), clipped, translucent];
+        assert_eq!(window_background_color(&quads, window), None);
+    }
 
     #[test]
     fn test_double_click_interval() {

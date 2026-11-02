@@ -1,14 +1,56 @@
+# CI pets (скилл pets-dev): PR и merge queue — один прогон, docs-PR без сборки.
+# Required check — `gate`.
 name: CI
 
 on:
-  push:
   pull_request:
+  merge_group:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
 
 jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.d.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: d
+        name: Что изменилось
+        shell: bash
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+          HEAD_REF: ${{ github.head_ref }}
+        run: |
+          if [ -z "$BASE" ]; then echo rust=true >> "$GITHUB_OUTPUT"; exit 0; fi
+          git diff --name-only "$BASE" HEAD > changed.txt
+          if [ "$EVENT" = pull_request ]; then
+            python3 .github/lane_check.py lanes.toml changed.txt "$HEAD_REF"
+          fi
+          if grep -qvE '^(docs/|skills/|[^/]*\.md$|.*/README\.md$)' changed.txt; then
+            echo rust=true >> "$GITHUB_OUTPUT"
+          else
+            echo rust=false >> "$GITHUB_OUTPUT"
+          fi
+
   test:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     name: windows-latest
     runs-on: windows-latest
     steps:
@@ -17,6 +59,9 @@ jobs:
         with:
           components: clippy, rustfmt
       - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Формат
         run: cargo fmt --all --check
       - name: Clippy
@@ -25,6 +70,8 @@ jobs:
         run: cargo test --workspace
 
   gpui-windows:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     name: gpui-windows (патч gpui)
     runs-on: windows-latest
     steps:
@@ -33,5 +80,18 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: crates/pets-gpui-windows
+          shared-key: gpui-windows
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Тесты наших правок
-        run: cargo test --manifest-path crates/pets-gpui-windows/Cargo.toml --lib --features test-support vsync
+        run: cargo test --manifest-path crates/pets-gpui-windows/Cargo.toml --lib --features test-support -- vsync force_warp lazy_path image_sprite background pets_
+
+  gate:
+    needs: [changes, test, gpui-windows]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - shell: bash
+        run: |
+          r='${{ join(needs.*.result, ' ') }}'
+          echo "$r"
+          case " $r " in *" failure "*|*" cancelled "*) exit 1;; esac

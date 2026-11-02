@@ -73,14 +73,34 @@ struct DirectXResources {
     render_target: Option<ID3D11Texture2D>,
     render_target_view: Option<ID3D11RenderTargetView>,
 
-    // Path intermediate textures (with MSAA)
-    path_intermediate_texture: ID3D11Texture2D,
-    path_intermediate_srv: Option<ID3D11ShaderResourceView>,
-    path_intermediate_msaa_texture: ID3D11Texture2D,
-    path_intermediate_msaa_view: Option<ID3D11RenderTargetView>,
+    // Path intermediate textures (with MSAA). Pets patch: created on the first frame that has paths, dropped
+    // on resize (recreated at the new size when paths come again). They are window-sized (one plain, one 4x MSAA:
+    // 5 surfaces), most frames have no paths, and on an integrated GPU they are process memory: 33 MB at 1600x1000.
+    path_textures: Option<PathTextures>,
 
     // Cached viewport
     viewport: D3D11_VIEWPORT,
+}
+
+struct PathTextures {
+    texture: ID3D11Texture2D,
+    srv: Option<ID3D11ShaderResourceView>,
+    msaa_texture: ID3D11Texture2D,
+    msaa_view: Option<ID3D11RenderTargetView>,
+}
+
+impl PathTextures {
+    fn new(device: &ID3D11Device, width: u32, height: u32) -> Result<Self> {
+        let (texture, srv) = create_path_intermediate_texture(device, width, height)?;
+        let (msaa_texture, msaa_view) =
+            create_path_intermediate_msaa_texture_and_view(device, width, height)?;
+        Ok(Self {
+            texture,
+            srv,
+            msaa_texture,
+            msaa_view,
+        })
+    }
 }
 
 struct DirectXRenderPipelines {
@@ -497,6 +517,18 @@ impl DirectXRenderer {
         let resources = self.resources.as_mut().context("resources missing")?;
         resources.render_target.take();
         resources.render_target_view.take();
+        if resources.path_textures.is_some() {
+            // Pets patch: the path sprite pass leaves the path texture bound to slot 0; unbind it so the old
+            // window-sized textures are freed now, not on the next textured draw.
+            unsafe {
+                devices
+                    .device_context
+                    .VSSetShaderResources(0, Some(&[None]));
+                devices
+                    .device_context
+                    .PSSetShaderResources(0, Some(&[None]));
+            }
+        }
 
         // Resizing the swap chain requires a call to the underlying DXGI adapter, which can return the device removed error.
         // The app might have moved to a monitor that's attached to a different graphics device.
@@ -618,18 +650,26 @@ impl DirectXRenderer {
         }
 
         let devices = self.devices.as_ref().context("devices missing")?;
-        let resources = self.resources.as_ref().context("resources missing")?;
+        let resources = self.resources.as_mut().context("resources missing")?;
+        if resources.path_textures.is_none() {
+            log::debug!("path textures {}x{}", self.width, self.height);
+            resources.path_textures =
+                Some(PathTextures::new(&devices.device, self.width, self.height)?);
+        }
+        let resources = &*resources;
+        let path_textures = resources
+            .path_textures
+            .as_ref()
+            .context("path textures missing")?;
         // Clear intermediate MSAA texture
         unsafe {
-            devices.device_context.ClearRenderTargetView(
-                resources.path_intermediate_msaa_view.as_ref().unwrap(),
-                &[0.0; 4],
-            );
+            devices
+                .device_context
+                .ClearRenderTargetView(path_textures.msaa_view.as_ref().unwrap(), &[0.0; 4]);
             // Set intermediate MSAA texture as render target
-            devices.device_context.OMSetRenderTargets(
-                Some(slice::from_ref(&resources.path_intermediate_msaa_view)),
-                None,
-            );
+            devices
+                .device_context
+                .OMSetRenderTargets(Some(slice::from_ref(&path_textures.msaa_view)), None);
         }
 
         // Collect all vertices and sprites for a single draw call
@@ -660,9 +700,9 @@ impl DirectXRenderer {
         // Resolve MSAA to non-MSAA intermediate texture
         unsafe {
             devices.device_context.ResolveSubresource(
-                &resources.path_intermediate_texture,
+                &path_textures.texture,
                 0,
-                &resources.path_intermediate_msaa_texture,
+                &path_textures.msaa_texture,
                 0,
                 RENDER_TARGET_FORMAT,
             );
@@ -704,6 +744,9 @@ impl DirectXRenderer {
 
         let devices = self.devices.as_ref().context("devices missing")?;
         let resources = self.resources.as_ref().context("resources missing")?;
+        let Some(path_textures) = resources.path_textures.as_ref() else {
+            return Ok(());
+        };
         self.pipelines.path_sprite_pipeline.update_buffer(
             &devices.device,
             &devices.device_context,
@@ -713,7 +756,7 @@ impl DirectXRenderer {
         // Draw the sprites with the path texture
         self.pipelines.path_sprite_pipeline.draw_with_texture(
             &devices.device_context,
-            slice::from_ref(&resources.path_intermediate_srv),
+            slice::from_ref(&path_textures.srv),
             slice::from_ref(&self.globals.sampler),
             sprites.len() as u32,
         )
@@ -889,25 +932,15 @@ impl DirectXResources {
             )?
         };
 
-        let (
-            render_target,
-            render_target_view,
-            path_intermediate_texture,
-            path_intermediate_srv,
-            path_intermediate_msaa_texture,
-            path_intermediate_msaa_view,
-            viewport,
-        ) = create_resources(devices, &swap_chain, width, height)?;
+        let (render_target, render_target_view, viewport) =
+            create_resources(devices, &swap_chain, width, height)?;
         set_rasterizer_state(&devices.device, &devices.device_context)?;
 
         Ok(Self {
             swap_chain,
             render_target: Some(render_target),
             render_target_view,
-            path_intermediate_texture,
-            path_intermediate_msaa_texture,
-            path_intermediate_msaa_view,
-            path_intermediate_srv,
+            path_textures: None,
             viewport,
         })
     }
@@ -919,21 +952,11 @@ impl DirectXResources {
         width: u32,
         height: u32,
     ) -> Result<()> {
-        let (
-            render_target,
-            render_target_view,
-            path_intermediate_texture,
-            path_intermediate_srv,
-            path_intermediate_msaa_texture,
-            path_intermediate_msaa_view,
-            viewport,
-        ) = create_resources(devices, &self.swap_chain, width, height)?;
+        let (render_target, render_target_view, viewport) =
+            create_resources(devices, &self.swap_chain, width, height)?;
         self.render_target = Some(render_target);
         self.render_target_view = render_target_view;
-        self.path_intermediate_texture = path_intermediate_texture;
-        self.path_intermediate_msaa_texture = path_intermediate_msaa_texture;
-        self.path_intermediate_msaa_view = path_intermediate_msaa_view;
-        self.path_intermediate_srv = path_intermediate_srv;
+        self.path_textures = None;
         self.viewport = viewport;
         Ok(())
     }
@@ -1363,18 +1386,10 @@ fn create_resources(
 ) -> Result<(
     ID3D11Texture2D,
     Option<ID3D11RenderTargetView>,
-    ID3D11Texture2D,
-    Option<ID3D11ShaderResourceView>,
-    ID3D11Texture2D,
-    Option<ID3D11RenderTargetView>,
     D3D11_VIEWPORT,
 )> {
     let (render_target, render_target_view) =
         create_render_target_and_its_view(swap_chain, &devices.device)?;
-    let (path_intermediate_texture, path_intermediate_srv) =
-        create_path_intermediate_texture(&devices.device, width, height)?;
-    let (path_intermediate_msaa_texture, path_intermediate_msaa_view) =
-        create_path_intermediate_msaa_texture_and_view(&devices.device, width, height)?;
     let viewport = D3D11_VIEWPORT {
         TopLeftX: 0.0,
         TopLeftY: 0.0,
@@ -1383,15 +1398,7 @@ fn create_resources(
         MinDepth: 0.0,
         MaxDepth: 1.0,
     };
-    Ok((
-        render_target,
-        render_target_view,
-        path_intermediate_texture,
-        path_intermediate_srv,
-        path_intermediate_msaa_texture,
-        path_intermediate_msaa_view,
-        viewport,
-    ))
+    Ok((render_target, render_target_view, viewport))
 }
 
 #[inline]
@@ -2097,6 +2104,282 @@ mod shader_time_tests {
         eprintln!("total {:?}, {n} bytes", t.elapsed());
         assert!(n > 10_000);
         #[cfg(not(shaders_runtime))]
-        assert!(t.elapsed() < std::time::Duration::from_millis(20), "{:?}", t.elapsed());
+        assert!(
+            t.elapsed() < std::time::Duration::from_millis(20),
+            "{:?}",
+            t.elapsed()
+        );
+    }
+}
+
+// Pets patch: path intermediate textures are created lazily and dropped on resize.
+#[cfg(test)]
+mod lazy_path_tests {
+    use super::DirectXRenderer;
+    use crate::directx_devices::DirectXDevices;
+    use gpui::{
+        Bounds, ContentMask, DevicePixels, Path, Scene, WindowBackgroundAppearance, point, px, rgb,
+        size,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+    };
+    use windows::core::w;
+
+    /// A filled red square, `x0..x1` × `y0..y1` (logical = device pixels at scale 1).
+    fn square_scene(x0: f32, y0: f32, x1: f32, y1: f32) -> Scene {
+        let mut path = Path::new(point(px(x0), px(y0)));
+        path.line_to(point(px(x1), px(y0)));
+        path.line_to(point(px(x1), px(y1)));
+        path.line_to(point(px(x0), px(y1)));
+        path.color = rgb(0xff0000).into();
+        path.content_mask = ContentMask {
+            bounds: Bounds::new(point(px(0.), px(0.)), size(px(4096.), px(4096.))),
+        };
+        let mut scene = Scene::default();
+        scene.insert_primitive(path.scale(1.0));
+        scene.finish();
+        scene
+    }
+
+    fn is_red(image: &image::RgbaImage, x: u32, y: u32) -> bool {
+        let p = image.get_pixel(x, y).0;
+        p[0] > 200 && p[1] < 60 && p[2] < 60
+    }
+
+    #[test]
+    fn lazy_path_textures_follow_paths_and_size() -> anyhow::Result<()> {
+        // A hidden window: the swap chain needs an HWND, nothing is shown.
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("lazy path textures test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                200,
+                200,
+                None,
+                None,
+                None,
+                None,
+            )
+        }?;
+        let devices = DirectXDevices::new()?;
+        let mut renderer = DirectXRenderer::new(hwnd, &devices, true)?;
+        let has_textures = |r: &DirectXRenderer| {
+            r.resources
+                .as_ref()
+                .is_some_and(|r| r.path_textures.is_some())
+        };
+
+        renderer.resize(size(DevicePixels(64), DevicePixels(64)))?;
+        assert!(
+            !has_textures(&renderer),
+            "no textures before the first path"
+        );
+
+        // A frame without paths does not create them.
+        let mut empty = Scene::default();
+        empty.finish();
+        renderer.render_to_image(&empty, WindowBackgroundAppearance::Opaque)?;
+        assert!(
+            !has_textures(&renderer),
+            "a frame without paths creates no textures"
+        );
+
+        // The first frame with paths creates them and draws the path.
+        let image = renderer.render_to_image(
+            &square_scene(10., 10., 50., 50.),
+            WindowBackgroundAppearance::Opaque,
+        )?;
+        assert!(
+            has_textures(&renderer),
+            "a frame with paths creates the textures"
+        );
+        assert!(
+            is_red(&image, 30, 30),
+            "path drawn: {:?}",
+            image.get_pixel(30, 30)
+        );
+        assert!(
+            !is_red(&image, 5, 5),
+            "outside the path: {:?}",
+            image.get_pixel(5, 5)
+        );
+
+        // Resize drops them; the next path frame recreates them at the new size.
+        renderer.resize(size(DevicePixels(160), DevicePixels(120)))?;
+        assert!(!has_textures(&renderer), "resize drops the textures");
+        let image = renderer.render_to_image(
+            &square_scene(100., 70., 150., 110.),
+            WindowBackgroundAppearance::Opaque,
+        )?;
+        assert!(has_textures(&renderer));
+        assert_eq!((image.width(), image.height()), (160, 120));
+        assert!(
+            is_red(&image, 125, 90),
+            "path beyond the old size: {:?}",
+            image.get_pixel(125, 90)
+        );
+        assert!(
+            !is_red(&image, 30, 30),
+            "the old frame is gone: {:?}",
+            image.get_pixel(30, 30)
+        );
+
+        drop(renderer);
+        unsafe { DestroyWindow(hwnd) }?;
+        Ok(())
+    }
+}
+
+// Pets: images larger than the 1024 atlas page and images clipped by a content mask draw correctly (a check
+// after Postman S5-07 blamed the renderer for an `img` layout trap — `docs/recipes/gpui-pitfalls.md`, «Картинки»).
+#[cfg(test)]
+mod image_sprite_tests {
+    use super::DirectXRenderer;
+    use crate::directx_devices::DirectXDevices;
+    use gpui::{
+        AtlasKey, AtlasTile, Bounds, ContentMask, Corners, DevicePixels, ImageId, PolychromeSprite,
+        RenderImageParams, ScaledPixels, Scene, Size, WindowBackgroundAppearance, point, size,
+    };
+    use std::borrow::Cow;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CreateWindowExW, DestroyWindow, WINDOW_EX_STYLE, WS_OVERLAPPEDWINDOW,
+    };
+    use windows::core::w;
+
+    /// BGRA "coordinate" gradient: R = x % 256, G = y % 256, B = (x / 256) * 16 + y / 256.
+    fn gradient(size: Size<DevicePixels>) -> Vec<u8> {
+        let (w, h) = (size.width.0, size.height.0);
+        let mut v = Vec::with_capacity((w * h * 4) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                v.extend_from_slice(&[
+                    ((x / 256) * 16 + y / 256) as u8,
+                    (y % 256) as u8,
+                    (x % 256) as u8,
+                    255,
+                ]);
+            }
+        }
+        v
+    }
+
+    /// The image pixel a rendered RGBA pixel shows (inverse of [`gradient`]).
+    fn decode(image: &image::RgbaImage, x: u32, y: u32) -> (i32, i32) {
+        let [r, g, b, _] = image.get_pixel(x, y).0.map(i32::from);
+        ((b >> 4) * 256 + r, (b & 15) * 256 + g)
+    }
+
+    fn sbounds(x: f32, y: f32, w: f32, h: f32) -> Bounds<ScaledPixels> {
+        Bounds::new(
+            point(ScaledPixels(x), ScaledPixels(y)),
+            size(ScaledPixels(w), ScaledPixels(h)),
+        )
+    }
+
+    fn insert(renderer: &DirectXRenderer, id: usize, image: Size<DevicePixels>) -> AtlasTile {
+        let bytes = gradient(image);
+        renderer
+            .sprite_atlas()
+            .get_or_insert_with(
+                AtlasKey::Image(RenderImageParams {
+                    image_id: ImageId(id),
+                    frame_index: 0,
+                }),
+                &mut || Ok(Some((image, Cow::Borrowed(bytes.as_slice())))),
+            )
+            .expect("atlas insert")
+            .expect("tile")
+    }
+
+    fn scene(tile: AtlasTile, bounds: Bounds<ScaledPixels>, mask: Bounds<ScaledPixels>) -> Scene {
+        let mut scene = Scene::default();
+        scene.insert_primitive(PolychromeSprite {
+            order: 0,
+            pad: 0,
+            grayscale: false.into(),
+            opacity: 1.0,
+            bounds,
+            content_mask: ContentMask { bounds: mask },
+            corner_radii: Corners::default(),
+            tile,
+        });
+        scene.finish();
+        scene
+    }
+
+    #[test]
+    fn large_and_clipped_images_draw_the_right_pixels() -> anyhow::Result<()> {
+        let hwnd = unsafe {
+            CreateWindowExW(
+                WINDOW_EX_STYLE(0),
+                w!("STATIC"),
+                w!("image sprite test"),
+                WS_OVERLAPPEDWINDOW,
+                0,
+                0,
+                200,
+                200,
+                None,
+                None,
+                None,
+                None,
+            )
+        }?;
+        let devices = DirectXDevices::new()?;
+        let mut renderer = DirectXRenderer::new(hwnd, &devices, true)?;
+        renderer.resize(size(DevicePixels(2000), DevicePixels(1400)))?;
+
+        // A small image first: the polychrome atlas gets its default 1024 × 1024 page.
+        let small = insert(&renderer, 1, size(DevicePixels(600), DevicePixels(400)));
+        // 2000 × 1400 does not fit that page: the atlas adds a page of the image's size.
+        let big = insert(&renderer, 2, size(DevicePixels(2000), DevicePixels(1400)));
+        assert_ne!(small.texture_id, big.texture_id);
+
+        let full = sbounds(0., 0., 2000., 1400.);
+        let image = renderer
+            .render_to_image(&scene(big, full, full), WindowBackgroundAppearance::Opaque)?;
+        for (x, y) in [(10, 10), (1500, 1000), (1999, 1399)] {
+            assert_eq!(
+                decode(&image, x, y),
+                (x as i32, y as i32),
+                "big image at ({x}, {y})"
+            );
+        }
+
+        // Scaled down to half: still drawn, pixel (x, y) shows image pixel (2x, 2y).
+        let half = sbounds(0., 0., 1000., 700.);
+        let image = renderer
+            .render_to_image(&scene(big, half, full), WindowBackgroundAppearance::Opaque)?;
+        let (x, y) = decode(&image, 700, 500);
+        assert!(
+            (x - 1400).abs() <= 2 && (y - 1000).abs() <= 2,
+            "half-size big image: ({x}, {y})"
+        );
+
+        // Clipped by the top edge of a scroll area: the image starts 300 px above, the mask is 0..100.
+        let image = renderer.render_to_image(
+            &scene(
+                small,
+                sbounds(0., -300., 600., 400.),
+                sbounds(0., 0., 600., 100.),
+            ),
+            WindowBackgroundAppearance::Opaque,
+        )?;
+        assert_eq!(decode(&image, 10, 10), (10, 310));
+        assert_eq!(decode(&image, 300, 99), (300, 399));
+        assert_eq!(
+            image.get_pixel(10, 150).0,
+            [255, 255, 255, 255],
+            "outside the mask"
+        );
+
+        drop(renderer);
+        unsafe { DestroyWindow(hwnd) }?;
+        Ok(())
     }
 }

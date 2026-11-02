@@ -1,0 +1,10 @@
+# Класс B (скилл pets-dev): только с approve владельца. Остальное — merge queue на зелёном CI.
+/Cargo.toml                 @Dicobraz
+/Cargo.lock                 @Dicobraz
+/clippy.toml                @Dicobraz
+/rustfmt.toml               @Dicobraz
+/.github/                   @Dicobraz
+/lanes.toml                 @Dicobraz
+/CLAUDE.md                  @Dicobraz
+/docs/decisions.md          @Dicobraz
+/skills/                    @Dicobraz

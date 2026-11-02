@@ -20,6 +20,8 @@ fluent-syntax = "0.12"
 unic-langid = "0.9"
 sys-locale = "0.3"
 windows-sys = "0.61"
+toml = "1.1"
+futures = { version = "0.3", default-features = false, features = ["std"] }
 # Версия как у приложений: одна сборка gpui на рабочую область потребителя.
 gpui-kit = "=0.7.3"
 

@@ -196,6 +196,17 @@ features = [
     "Win32_UI_Input_Pointer",
 ]
 
+# Pets patch: платформенный код окна для приложений (`src/pets`) — та же версия windows-sys, что у приложений Pets.
+[target.'cfg(target_os = "windows")'.dependencies.windows-sys]
+version = "0.61"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
+    "Win32_System_LibraryLoader",
+    "Win32_UI_WindowsAndMessaging",
+]
+
 [target.'cfg(target_os = "windows")'.dependencies.windows-core]
 version = "0.62"
 

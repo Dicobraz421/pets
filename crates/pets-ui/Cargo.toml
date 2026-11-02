@@ -1,6 +1,6 @@
 [package]
 name = "pets-ui"
-description = "Визуальный язык приложений Pets на gpui: тосты и история уведомлений"
+description = "Визуальный язык приложений Pets на gpui: темы и токены ролей, тосты и история уведомлений"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -9,6 +9,29 @@ repository.workspace = true
 [dependencies]
 gpui-kit.workspace = true
 pets-i18n.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+toml.workspace = true
+futures.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Accessibility",
+    "Win32_UI_WindowsAndMessaging",
+] }
 
 [lints]
 workspace = true
+
+# Пример `image_check` (картинки Windows-платформы gpui): снимок PrintWindow и PNG.
+[dev-dependencies]
+image = { version = "0.25", default-features = false, features = ["png"] }
+raw-window-handle = "0.6"
+
+[target.'cfg(windows)'.dev-dependencies]
+windows-sys = { workspace = true, features = ["Win32_Storage_Xps"] }

@@ -14,7 +14,7 @@
 
 ## Порядок работы
 
-- Задача = ветка = PR в `main`. Перед PR: `cargo fmt --check`, `cargo clippy --workspace --all-targets -- -D warnings`,
-  `cargo test --workspace`. CI — Windows.
+- Процесс — скилл `pets-dev` (`skills/pets-dev/SKILL.md`): полосы `lanes.toml`, волна = PR, класс B — `.github/CODEOWNERS`.
+  Перед PR: `cargo fmt --check`, clippy и тесты затронутых крейтов; весь набор — CI (Windows, required check `gate`).
 - Изменение публичного API крейта — запись в `docs/decisions.md` и проверка обоих потребителей.
 - Ошибки — thiserror; логи — tracing; без `unwrap`/`expect` вне тестов.

@@ -16,4 +16,5 @@
 | [Тексты через Fluent](i18n.md) | любое | Postman S2-06, идея — Урфин |
 | [Жизнь процесса](process-shell.md) | любое, Windows | Postman S2-06 |
 | [Тосты вместо модальных окон](toasts.md) | любое | Postman S2-06 |
+| [Темы оформления](themes.md) | любое, Windows | pets-ui, токены Урфина |
 | [Грабли gpui и стенда](gpui-pitfalls.md) | любое, Windows | Урфин G-01…G-07 |

@@ -1,0 +1,28 @@
+# Полосы (скилл pets-dev). Пути — glob (fnmatch, * включает /). Первое совпадение сверху вниз.
+# Полоса = единица параллельной работы одного агента. Правка этого файла — класс B.
+
+[common]
+# Можно в любом PR: свои карточки, ручные проверки, новые решения.
+paths = ["docs/tasks/*", "docs/manual-tests/*", "docs/decisions/*", "docs/metrics/*"]
+
+[lane.core]
+paths = ["crates/core/*"]
+
+[lane.ui]
+paths = ["crates/ui/*", "crates/app/*"]
+
+[lane.i18n]
+paths = ["crates/i18n/*"]
+
+[lane.docs-gen]
+# Генерируемые документы: одна волна в день, от main.
+paths = ["docs/COMMANDS.md", "docs/PARITY.md"]
+
+[lane.docs]
+paths = ["docs/*", "*.md"]
+
+[lane.deps]
+paths = ["Cargo.toml", "Cargo.lock", "deny.toml", "rust-toolchain.toml"]
+
+[lane.ci]
+paths = [".github/*", "ci/*", "scripts/*", ".config/*", ".cargo/*", "lanes.toml"]

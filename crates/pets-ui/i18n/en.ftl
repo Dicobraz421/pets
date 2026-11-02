@@ -6,3 +6,9 @@ pets-ui-ago = { $min ->
     [0] just now
    *[other] { $min } min ago
 }
+pets-ui-theme-system = As in Windows
+pets-ui-theme-fluent-light = Fluent light
+pets-ui-theme-fluent-dark = Fluent dark
+pets-ui-theme-high-contrast = High contrast
+pets-ui-theme-locked = The theme is set by your organization
+pets-ui-theme-invalid = Theme “{ $theme }” has errors; details are in the log

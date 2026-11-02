@@ -2,13 +2,18 @@
 //!
 //! Логика очереди ([`Queue`]) — без окна и таймеров, проверяется тестами; [`Toasts`] — view gpui поверх неё.
 //! Таймер скрытия живёт, только пока тост на экране: в простое кадров нет (кадры по запросу).
+//! Цвета и размеры — роли текущей темы ([`Theme::global`]).
 
 use std::collections::VecDeque;
+use std::fmt;
+use std::rc::Rc;
 use std::time::{Duration, Instant};
 
 use gpui_kit::prelude::*;
 use gpui_kit::*;
 use pets_i18n::tr;
+
+use crate::theme::{Metric, Role, Theme};
 
 /// Важность уведомления: цвет метки и время на экране.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,7 +25,7 @@ pub enum Level {
 }
 
 impl Level {
-    /// Сколько тост виден: ошибку успевают прочитать.
+    /// Сколько тост виден: ошибку успевают прочитать. Тост с действием — [`ACTION_DURATION`].
     pub fn duration(self) -> Duration {
         match self {
             Level::Error => Duration::from_secs(8),
@@ -38,14 +43,50 @@ impl Level {
         }
     }
 
-    /// Цвета Fluent: info, success, warning, danger.
-    fn color(self) -> Rgba {
+    /// Роль метки. Предупреждение нейтральное: красный — только ошибки (Postman DESIGN «Действия и состояния»).
+    pub fn role(self) -> Role {
         match self {
-            Level::Info => rgb(0x0f6cbd),
-            Level::Success => rgb(0x107c10),
-            Level::Warning => rgb(0xbc4b09),
-            Level::Error => rgb(0xc50f1f),
+            Level::Info => Role::AccentFill,
+            Level::Success => Role::SuccessFg,
+            Level::Warning => Role::TextSecondary,
+            Level::Error => Role::CriticalFg,
         }
+    }
+}
+
+/// Тост с действием виден дольше: успеть нажать «Отменить».
+pub const ACTION_DURATION: Duration = Duration::from_secs(15);
+
+/// Обработчик действия тоста; вызывается вне обновления [`Toasts`] (`window.defer`).
+pub type ActionFn = Rc<dyn Fn(&mut Window, &mut App)>;
+
+/// Кнопка в тосте («Отменить»): подпись (уже переведённая) и обработчик. Срабатывает не больше одного раза.
+#[derive(Clone)]
+pub struct ToastAction {
+    pub label: SharedString,
+    pub run: ActionFn,
+}
+
+impl ToastAction {
+    pub fn new(label: impl Into<SharedString>, run: impl Fn(&mut Window, &mut App) + 'static) -> Self {
+        Self {
+            label: label.into(),
+            run: Rc::new(run),
+        }
+    }
+}
+
+impl fmt::Debug for ToastAction {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ToastAction")
+            .field("label", &self.label)
+            .finish_non_exhaustive()
+    }
+}
+
+impl PartialEq for ToastAction {
+    fn eq(&self, other: &Self) -> bool {
+        self.label == other.label && Rc::ptr_eq(&self.run, &other.run)
     }
 }
 
@@ -55,6 +96,19 @@ pub struct Toast {
     pub level: Level,
     pub text: SharedString,
     pub at: Instant,
+    /// Действие, пока не выполнено и тост на экране.
+    pub action: Option<ToastAction>,
+}
+
+impl Toast {
+    /// Сколько тост виден.
+    pub fn duration(&self) -> Duration {
+        if self.action.is_some() {
+            ACTION_DURATION
+        } else {
+            self.level.duration()
+        }
+    }
 }
 
 /// Тосты на экране (не больше [`Queue::MAX_SHOWN`], старый уходит) и история (новые сверху).
@@ -72,14 +126,24 @@ impl Queue {
 
     /// Новый тост; возвращает его id для скрытия по таймеру.
     pub fn push(&mut self, level: Level, text: SharedString, at: Instant) -> u64 {
+        self.push_with(level, text, None, at)
+    }
+
+    /// Новый тост с необязательным действием.
+    pub fn push_with(&mut self, level: Level, text: SharedString, action: Option<ToastAction>, at: Instant) -> u64 {
         self.next += 1;
         let toast = Toast {
             id: self.next,
             level,
             text,
             at,
+            action,
         };
-        self.history.push_front(toast.clone());
+        // В истории действия нет: отмена — пока тост на экране.
+        self.history.push_front(Toast {
+            action: None,
+            ..toast.clone()
+        });
         self.history.truncate(Self::MAX_HISTORY);
         self.unread = (self.unread + 1).min(Self::MAX_HISTORY);
         self.shown.push(toast);
@@ -94,6 +158,12 @@ impl Queue {
         let before = self.shown.len();
         self.shown.retain(|t| t.id != id);
         self.shown.len() != before
+    }
+
+    /// Нажато действие: тост уходит с экрана, действие отдаётся один раз (второе нажатие — `None`).
+    pub fn take_action(&mut self, id: u64) -> Option<ToastAction> {
+        let i = self.shown.iter().position(|t| t.id == id)?;
+        self.shown.remove(i).action
     }
 
     pub fn shown(&self) -> &[Toast] {
@@ -131,9 +201,31 @@ impl Toasts {
 
     /// Показать уведомление; скроется само через [`Level::duration`].
     pub fn push(&mut self, level: Level, text: impl Into<SharedString>, cx: &mut Context<Self>) {
-        let id = self.queue.push(level, text.into(), Instant::now());
+        self.push_with(level, text, None, cx);
+    }
+
+    /// Уведомление с кнопкой (`ToastAction::new(tr!("…-undo"), |window, cx| …)`); видно [`ACTION_DURATION`].
+    pub fn push_action(
+        &mut self,
+        level: Level,
+        text: impl Into<SharedString>,
+        action: ToastAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.push_with(level, text, Some(action), cx);
+    }
+
+    fn push_with(
+        &mut self,
+        level: Level,
+        text: impl Into<SharedString>,
+        action: Option<ToastAction>,
+        cx: &mut Context<Self>,
+    ) {
+        let id = self.queue.push_with(level, text.into(), action, Instant::now());
+        let duration = self.queue.shown().last().map_or(level.duration(), Toast::duration);
         cx.spawn(async move |this, cx| {
-            cx.background_executor().timer(level.duration()).await;
+            cx.background_executor().timer(duration).await;
             let _ = this.update(cx, |t, cx| {
                 if t.queue.hide(id) {
                     cx.notify();
@@ -169,74 +261,114 @@ impl Toasts {
 
 const WIDTH: f32 = 360.;
 
+fn shadow(t: &Theme) -> Vec<BoxShadow> {
+    vec![BoxShadow {
+        color: t.c(Role::ShadowOverlay),
+        offset: point(px(0.), px(8.)),
+        blur_radius: px(16.),
+        spread_radius: px(0.),
+        inset: false,
+    }]
+}
+
 impl Render for Toasts {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let theme = Theme::global(cx).clone();
         if self.history_open {
-            return history(&self.queue, cx).into_any_element();
+            return history(&self.queue, &theme, cx).into_any_element();
         }
         if self.queue.shown().is_empty() {
             return div().into_any_element();
         }
+        let t = &theme;
         div()
             .absolute()
-            .top(px(48.))
-            .right(px(12.))
+            .top(px(t.m(Metric::HTitlebar) + t.m(Metric::SpaceS)))
+            .right(t.px(Metric::SpaceM))
             .w(px(WIDTH))
             .flex()
             .flex_col()
-            .gap_2()
-            .children(self.queue.shown().iter().rev().map(|t| {
-                let id = t.id;
-                card(t)
+            .gap(t.px(Metric::SpaceS))
+            .children(self.queue.shown().iter().rev().map(|toast| {
+                let id = toast.id;
+                let mut c = card(toast, t)
                     .id(("toast", id as usize))
                     .occlude()
                     .cursor_pointer()
-                    .shadow_md()
+                    .shadow(shadow(t))
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if this.queue.hide(id) {
                             cx.notify();
                         }
-                    }))
+                    }));
+                if let Some(action) = &toast.action {
+                    c = c.child(
+                        div()
+                            .id(("toast-action", id as usize))
+                            .flex_none()
+                            .px(t.px(Metric::SpaceS))
+                            .rounded(t.px(Metric::RadiusControl))
+                            .text_color(t.c(Role::AccentText))
+                            .font_weight(FontWeight::SEMIBOLD)
+                            .hover(|d| d.bg(t.c(Role::FillSubtleHover)))
+                            .active(|d| d.bg(t.c(Role::FillSubtlePressed)))
+                            .child(action.label.clone())
+                            .on_click(cx.listener(move |this, _, window, cx| {
+                                cx.stop_propagation();
+                                if let Some(action) = this.queue.take_action(id) {
+                                    cx.notify();
+                                    // Обработчик может трогать эти же тосты: не внутри их обновления.
+                                    let run = action.run;
+                                    window.defer(cx, move |window, cx| run(window, cx));
+                                }
+                            })),
+                    );
+                }
+                c
             }))
             .into_any_element()
     }
 }
 
-fn card(t: &Toast) -> Div {
+fn card(toast: &Toast, t: &Theme) -> Div {
+    let mark = t.c(toast.level.role());
     // Цвет у gpui — один на все стороны рамки: метка важности — полоса слева.
     div()
         .relative()
         .overflow_hidden()
         .flex()
-        .gap_2()
-        .p_3()
-        .pl_4()
-        .rounded_md()
-        .bg(rgb(0xffffff))
+        .items_start()
+        .gap(t.px(Metric::SpaceS))
+        .p(t.px(Metric::SpaceM))
+        .pl(t.px(Metric::SpaceL))
+        .rounded(t.px(Metric::RadiusOverlay))
+        .bg(t.c(Role::LayerOverlay))
         .border_1()
-        .border_color(rgb(0xe0e0e0))
+        .border_color(t.c(Role::StrokeCard))
+        .text_size(t.px(Metric::TypeBody))
+        .text_color(t.c(Role::TextPrimary))
         .child(
             div()
                 .absolute()
                 .left_0()
                 .top_0()
                 .bottom_0()
-                .w(px(4.))
-                .bg(t.level.color()),
+                .w(t.px(Metric::WAccentBar))
+                .bg(mark),
         )
-        .child(div().text_color(t.level.color()).child(t.level.icon()))
-        .child(div().flex_1().min_w_0().child(t.text.clone()))
+        .child(div().text_color(mark).child(toast.level.icon()))
+        .child(div().flex_1().min_w_0().child(toast.text.clone()))
 }
 
-fn history(queue: &Queue, cx: &mut Context<Toasts>) -> impl IntoElement {
+fn history(queue: &Queue, t: &Theme, cx: &mut Context<Toasts>) -> impl IntoElement {
     let now = Instant::now();
     let header = div()
         .flex()
         .items_center()
-        .px_3()
-        .py_2()
+        .px(t.px(Metric::SpaceM))
+        .py(t.px(Metric::SpaceS))
         .border_b_1()
-        .border_color(rgb(0xe0e0e0))
+        .border_color(t.c(Role::StrokeDivider))
         .child(
             div()
                 .flex_1()
@@ -246,10 +378,10 @@ fn history(queue: &Queue, cx: &mut Context<Toasts>) -> impl IntoElement {
         .child(
             div()
                 .id("toasts-close")
-                .px_2()
-                .rounded_md()
+                .px(t.px(Metric::SpaceS))
+                .rounded(t.px(Metric::RadiusControl))
                 .cursor_pointer()
-                .hover(|d| d.bg(rgb(0xececec)))
+                .hover(|d| d.bg(t.c(Role::FillSubtleHover)))
                 .child("✕")
                 .on_click(cx.listener(|this, _, _, cx| this.toggle_history(cx))),
         );
@@ -259,18 +391,19 @@ fn history(queue: &Queue, cx: &mut Context<Toasts>) -> impl IntoElement {
         .flex_col()
         .flex_1()
         .min_h_0()
-        .p_2()
-        .gap_2()
+        .p(t.px(Metric::SpaceS))
+        .gap(t.px(Metric::SpaceS))
         .overflow_y_scroll();
     let mut empty = true;
-    for t in queue.history() {
+    for toast in queue.history() {
         empty = false;
-        let min = now.duration_since(t.at).as_secs() / 60;
+        let min = now.duration_since(toast.at).as_secs() / 60;
         list = list.child(
-            card(t).child(
+            card(toast, t).child(
                 div()
-                    .text_xs()
-                    .text_color(rgb(0x888888))
+                    .flex_none()
+                    .text_size(t.px(Metric::TypeCaption))
+                    .text_color(t.c(Role::TextSecondary))
                     .child(tr!("pets-ui-ago", min = min as i64)),
             ),
         );
@@ -278,8 +411,8 @@ fn history(queue: &Queue, cx: &mut Context<Toasts>) -> impl IntoElement {
     if empty {
         list = list.child(
             div()
-                .p_2()
-                .text_color(rgb(0x888888))
+                .p(t.px(Metric::SpaceS))
+                .text_color(t.c(Role::TextSecondary))
                 .child(tr!("pets-ui-notifications-empty")),
         );
     }
@@ -293,17 +426,21 @@ fn history(queue: &Queue, cx: &mut Context<Toasts>) -> impl IntoElement {
         .flex()
         .flex_col()
         .occlude()
-        .bg(rgb(0xfafafa))
+        .bg(t.c(Role::LayerOverlay))
+        .text_size(t.px(Metric::TypeBody))
+        .text_color(t.c(Role::TextPrimary))
         .border_l_1()
-        .border_color(rgb(0xdddddd))
-        .shadow_lg()
+        .border_color(t.c(Role::StrokeDivider))
+        .shadow(shadow(t))
         .child(header)
         .child(list)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Level, Queue};
+    use super::{ACTION_DURATION, Level, Queue, ToastAction};
+    use std::cell::Cell;
+    use std::rc::Rc;
     use std::time::Instant;
 
     #[test]
@@ -353,6 +490,47 @@ mod tests {
     #[test]
     fn errors_stay_longer() {
         assert!(Level::Error.duration() > Level::Info.duration());
+    }
+
+    /// «Отменить»: действие одно на тост, срабатывает один раз, в истории его нет, тост держится дольше.
+    #[test]
+    fn action_is_taken_once_and_not_kept_in_history() {
+        let runs = Rc::new(Cell::new(0));
+        let r = runs.clone();
+        let action = ToastAction::new("Undo", move |_, _| r.set(r.get() + 1));
+        let mut q = Queue::default();
+        let plain = q.push(Level::Info, "plain".into(), Instant::now());
+        let id = q.push_with(
+            Level::Info,
+            "Moved to Archive".into(),
+            Some(action.clone()),
+            Instant::now(),
+        );
+        let shown = q.shown().iter().find(|t| t.id == id).unwrap();
+        assert_eq!(shown.action.as_ref(), Some(&action));
+        assert_eq!(shown.duration(), ACTION_DURATION);
+        assert!(q.history().all(|t| t.action.is_none()));
+        assert_eq!(q.take_action(plain), None, "no action — nothing to run");
+        assert_eq!(q.shown().len(), 1, "taking an absent action still closes the toast");
+        let taken = q.take_action(id).unwrap();
+        assert_eq!(taken.label.as_ref(), "Undo");
+        assert_eq!(q.take_action(id), None, "second click does nothing");
+        assert!(q.shown().is_empty());
+        assert_eq!(q.history().count(), 2);
+        assert_eq!(runs.get(), 0, "the queue never runs the action itself");
+    }
+
+    #[test]
+    fn hidden_toast_loses_its_action() {
+        let mut q = Queue::default();
+        let id = q.push_with(
+            Level::Info,
+            "x".into(),
+            Some(ToastAction::new("Undo", |_, _| {})),
+            Instant::now(),
+        );
+        assert!(q.hide(id));
+        assert_eq!(q.take_action(id), None);
     }
 
     #[test]

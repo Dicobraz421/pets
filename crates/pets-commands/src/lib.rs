@@ -4,6 +4,10 @@
 //!
 //! Крейт без UI. Записи клавиш и контекстов — в синтаксисе gpui (`ctrl-shift-r`, `Mailer && !Input`):
 //! интерфейс всех приложений Pets — gpui. Привязка к действиям gpui — в приложении (позже `pets-ui`).
+//!
+//! Схемы клавиш ([`Scheme`]): у приложения может быть несколько наборов сочетаний — например, «как Outlook» по
+//! умолчанию и «одиночные клавиши как Gmail». Клавиши по умолчанию — в [`Command::keys`]; схема — слой сочетаний
+//! поверх них (свой контекст у каждого), итог — [`bindings`]. Свои клавиши пользователя приложение кладёт поверх.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -66,6 +70,34 @@ pub enum Problem {
         first: &'static str,
         second: &'static str,
     },
+    #[error("схема {scheme}: нет команды {id}")]
+    UnknownCommand { scheme: &'static str, id: &'static str },
+}
+
+/// Схема клавиш: слой сочетаний поверх клавиш по умолчанию.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Scheme {
+    /// Имя схемы в настройках приложения (`single`).
+    pub id: &'static str,
+    pub keys: &'static [SchemeKeys],
+}
+
+/// Сочетания команды в схеме и где они действуют (у одиночных букв — обычно «вне полей ввода»).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SchemeKeys {
+    pub command: &'static str,
+    pub keys: &'static [&'static str],
+    pub context: Option<&'static str>,
+}
+
+/// Одна привязка: сочетание команды и контекст, где оно действует.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Binding {
+    pub command: &'static str,
+    pub keys: &'static str,
+    pub context: Option<&'static str>,
+    /// Из слоя схемы, а не по умолчанию.
+    pub from_scheme: bool,
 }
 
 /// Модификаторы gpui.
@@ -182,6 +214,83 @@ pub fn validate(commands: &[Command]) -> Vec<Problem> {
     problems
 }
 
+/// Привязки таблицы по схеме: клавиши по умолчанию, затем слой схемы. Сочетание по умолчанию, которое слой дал
+/// в том же месте (`same_place(контекст по умолчанию, контекст слоя)`), уходит: схема главнее. Без схемы — клавиши
+/// по умолчанию. Порядок — как в таблице, слой — после.
+pub fn bindings(
+    commands: &[Command],
+    scheme: Option<&Scheme>,
+    same_place: impl Fn(Option<&str>, Option<&str>) -> bool,
+) -> Vec<Binding> {
+    let canon = |k: &str| parse_keys(k).unwrap_or_else(|_| k.to_owned());
+    let layer: Vec<(String, &SchemeKeys, &'static str)> = scheme
+        .into_iter()
+        .flat_map(|s| s.keys.iter())
+        .flat_map(|sk| sk.keys.iter().map(move |&k| (canon(k), sk, k)))
+        .collect();
+    let mut out = Vec::new();
+    for c in commands {
+        for &keys in c.keys {
+            let k = canon(keys);
+            let taken = layer
+                .iter()
+                .any(|(lk, sk, _)| *lk == k && same_place(c.context, sk.context));
+            if !taken {
+                out.push(Binding {
+                    command: c.id,
+                    keys,
+                    context: c.context,
+                    from_scheme: false,
+                });
+            }
+        }
+    }
+    for (_, sk, keys) in layer {
+        out.push(Binding {
+            command: sk.command,
+            keys,
+            context: sk.context,
+            from_scheme: true,
+        });
+    }
+    out
+}
+
+/// Проверить схему на таблице: команды есть, сочетания разобраны, внутри слоя в одном контексте — без повторов.
+pub fn validate_scheme(commands: &[Command], scheme: &Scheme) -> Vec<Problem> {
+    let mut problems = Vec::new();
+    let mut bound: Vec<(String, Option<&'static str>, &'static str)> = Vec::new();
+    for sk in scheme.keys {
+        if find(commands, sk.command).is_none() {
+            problems.push(Problem::UnknownCommand {
+                scheme: scheme.id,
+                id: sk.command,
+            });
+        }
+        for &keys in sk.keys {
+            match parse_keys(keys) {
+                Err(why) => problems.push(Problem::BadKeys {
+                    id: sk.command,
+                    keys,
+                    why,
+                }),
+                Ok(canon) => {
+                    if let Some(&(_, _, first)) = bound.iter().find(|(k, ctx, _)| *k == canon && *ctx == sk.context) {
+                        problems.push(Problem::KeyConflict {
+                            keys: canon.clone(),
+                            context: sk.context,
+                            first,
+                            second: sk.command,
+                        });
+                    }
+                    bound.push((canon, sk.context, sk.command));
+                }
+            }
+        }
+    }
+    problems
+}
+
 /// Команда по id.
 pub fn find<'a>(commands: &'a [Command], id: &str) -> Option<&'a Command> {
     commands.iter().find(|c| c.id == id)
@@ -272,5 +381,103 @@ mod tests {
             "другой контекст"
         );
         assert!(p.iter().any(|p| matches!(p, Problem::BadKeys { id: "mail.bad", .. })));
+    }
+
+    const OUTLOOK: &[Command] = &[
+        cmd("mail.next", &["down"], Some("Mail && !Input")),
+        cmd("mail.reply", &["ctrl-r"], Some("Mail")),
+        cmd("search.focus", &["ctrl-e"], None),
+        cmd("mail.archive", &["e"], Some("Grid")),
+    ];
+
+    const SINGLE: Scheme = Scheme {
+        id: "single",
+        keys: &[
+            SchemeKeys {
+                command: "mail.next",
+                keys: &["j"],
+                context: Some("Mail && !Input"),
+            },
+            SchemeKeys {
+                command: "mail.reply",
+                keys: &["r"],
+                context: Some("Mail && !Input"),
+            },
+            SchemeKeys {
+                command: "search.focus",
+                keys: &["/"],
+                context: Some("Mail && !Input"),
+            },
+            SchemeKeys {
+                command: "mail.archive",
+                keys: &["e"],
+                context: Some("Mail && !Input"),
+            },
+        ],
+    };
+
+    /// Слой схемы — поверх клавиш по умолчанию; занятое слоем там же уходит, в другом месте — остаётся.
+    #[test]
+    fn scheme_layers_over_defaults() {
+        let any = |_: Option<&str>, _: Option<&str>| true;
+        let plain = bindings(OUTLOOK, None, any);
+        assert_eq!(plain.len(), 4);
+        assert!(plain.iter().all(|b| !b.from_scheme));
+        let all = bindings(OUTLOOK, Some(&SINGLE), any);
+        let keys = |id: &str| {
+            all.iter()
+                .filter(|b| b.command == id)
+                .map(|b| b.keys)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(keys("mail.next"), ["down", "j"]);
+        assert_eq!(keys("search.focus"), ["ctrl-e", "/"]);
+        assert_eq!(keys("mail.archive"), ["e"], "своё «e» по умолчанию — под слоем");
+        assert!(
+            all.iter()
+                .any(|b| b.keys == "j" && b.from_scheme && b.context == Some("Mail && !Input"))
+        );
+        // Другое место — «e» по умолчанию остаётся.
+        let apart = bindings(OUTLOOK, Some(&SINGLE), |a, b| a == b);
+        assert_eq!(apart.iter().filter(|b| b.keys == "e").count(), 2);
+    }
+
+    #[test]
+    fn schemes_are_validated() {
+        assert_eq!(validate_scheme(OUTLOOK, &SINGLE), vec![]);
+        const BAD: Scheme = Scheme {
+            id: "bad",
+            keys: &[
+                SchemeKeys {
+                    command: "mail.nope",
+                    keys: &["n"],
+                    context: None,
+                },
+                SchemeKeys {
+                    command: "mail.next",
+                    keys: &["j", "J"],
+                    context: None,
+                },
+                SchemeKeys {
+                    command: "mail.reply",
+                    keys: &["j"],
+                    context: None,
+                },
+            ],
+        };
+        let p = validate_scheme(OUTLOOK, &BAD);
+        assert!(p.contains(&Problem::UnknownCommand {
+            scheme: "bad",
+            id: "mail.nope"
+        }));
+        assert!(p.iter().any(|p| matches!(p, Problem::BadKeys { keys: "J", .. })));
+        assert!(p.iter().any(|p| matches!(
+            p,
+            Problem::KeyConflict {
+                first: "mail.next",
+                second: "mail.reply",
+                ..
+            }
+        )));
     }
 }

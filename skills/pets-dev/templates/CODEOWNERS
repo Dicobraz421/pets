@@ -1,0 +1,14 @@
+# Класс B (скилл pets-dev): изменения этих путей мержатся только с approve владельца.
+# Всё остальное (класс A) — merge queue на зелёном CI.
+# Проверьте логин владельца.
+/Cargo.toml            @Dicobraz
+/Cargo.lock            @Dicobraz
+/rust-toolchain.toml   @Dicobraz
+/deny.toml             @Dicobraz
+/.github/              @Dicobraz
+/.cargo/               @Dicobraz
+/lanes.toml            @Dicobraz
+/docs/CONTRACTS.md     @Dicobraz
+/docs/adr/             @Dicobraz
+/CLAUDE.md             @Dicobraz
+# + пути песочницы, sys-модулей с unsafe, публичных контрактов крейтов — по проекту
