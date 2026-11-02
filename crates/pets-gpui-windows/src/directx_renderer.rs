@@ -261,6 +261,35 @@ impl DirectXRenderer {
         Ok(())
     }
 
+    /// Pets patch: wait until the frame just presented can reach the screen — the GPU has finished
+    /// it (event query) and DWM has taken it (`DwmFlush`). A window uncloaked right after `Present`
+    /// may get one composition without it: a black frame for one vsync (Urfin start-probe, 7 of 9).
+    pub(crate) fn wait_frame_composed(&self) {
+        let Some(devices) = &self.devices else { return };
+        unsafe {
+            let desc = D3D11_QUERY_DESC { Query: D3D11_QUERY_EVENT, MiscFlags: 0 };
+            let mut query = None;
+            if devices.device.CreateQuery(&desc, Some(&mut query)).is_ok()
+                && let Some(query) = query
+            {
+                devices.device_context.End(&query);
+                devices.device_context.Flush();
+                let start = std::time::Instant::now();
+                let mut done = windows::core::BOOL(0);
+                while !done.as_bool() && start.elapsed() < std::time::Duration::from_millis(500) {
+                    let data = Some((&raw mut done).cast());
+                    if devices.device_context.GetData(&query, data, size_of::<windows::core::BOOL>() as u32, 0).is_err() {
+                        break;
+                    }
+                    if !done.as_bool() {
+                        std::thread::yield_now();
+                    }
+                }
+            }
+            windows::Win32::Graphics::Dwm::DwmFlush().log_err();
+        }
+    }
+
     #[inline]
     fn present(&mut self) -> Result<()> {
         let result = unsafe {
