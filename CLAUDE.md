@@ -17,5 +17,6 @@
 - Процесс — скилл `pets-dev` (`skills/pets-dev/SKILL.md`): полосы `lanes.toml`, волна = PR, класс B — `.github/CODEOWNERS`.
   Перед PR: `cargo fmt --all --check`, check/clippy своего крейта, свои новые тесты (`-E 'test(...)'`).
   Полный clippy, nextest и doc-тесты — только CI (Windows, required check `gate`), локально не дублировать.
+- Правка `skills/*/SKILL.md` — скилл аккаунта обновить тем же файлом (раздел «Скиллы аккаунта» в `pets-dev`).
 - Изменение публичного API крейта — запись в `docs/decisions.md` и проверка обоих потребителей.
 - Ошибки — thiserror; логи — tracing; без `unwrap`/`expect` вне тестов.

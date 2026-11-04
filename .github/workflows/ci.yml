@@ -42,6 +42,9 @@ jobs:
           if [ "$EVENT" = pull_request ]; then
             python3 .github/lane_check.py lanes.toml changed.txt "$HEAD_REF"
           fi
+          if grep -qE '^skills/[^/]+/SKILL\.md$' changed.txt; then
+            echo "::warning::Изменён SKILL.md — обновить скилл аккаунта claude.ai (pets-dev «Скиллы аккаунта»)"
+          fi
           if grep -qvE '^(docs/|skills/|[^/]*\.md$|.*/README\.md$)' changed.txt; then
             echo rust=true >> "$GITHUB_OUTPUT"
           else
