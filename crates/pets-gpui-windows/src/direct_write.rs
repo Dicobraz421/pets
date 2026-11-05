@@ -26,6 +26,9 @@ use windows_numerics::Vector2;
 use crate::*;
 use gpui::*;
 
+// Pets patch: быстрый путь `layout_line`, см. direct_write/fast.rs.
+mod fast;
+
 #[derive(Debug)]
 struct FontInfo {
     font_family_h: HSTRING,
@@ -79,6 +82,8 @@ struct DirectWriteState {
     font_to_font_id: HashMap<Font, FontId>,
     font_info_cache: HashMap<usize, FontId>,
     layout_line_scratch: Vec<u16>,
+    // Pets patch: быстрый путь `layout_line`.
+    fast: fast::FastCache,
 }
 
 impl GPUState {
@@ -217,6 +222,7 @@ impl DirectWriteTextSystem {
                 font_to_font_id: HashMap::default(),
                 font_info_cache: HashMap::default(),
                 layout_line_scratch: Vec::new(),
+                fast: fast::FastCache::default(),
             }),
         })
     }
@@ -521,7 +527,173 @@ impl DirectWriteState {
         None
     }
 
+    // Pets patch: сначала быстрый путь, всё, что он не берёт, — как раньше.
     fn layout_line(
+        &mut self,
+        components: &DirectWriteComponents,
+        text: &str,
+        font_size: Pixels,
+        font_runs: &[FontRun],
+    ) -> Result<LineLayout> {
+        match self.layout_line_fast(components, text, font_size, font_runs) {
+            Some(layout) => Ok(layout),
+            None => self.layout_line_slow(components, text, font_size, font_runs),
+        }
+    }
+
+    /// Разбор шрифта для быстрого пути; `None` — шрифт целиком старым путём.
+    fn fast_font(&mut self, font_id: FontId) -> Option<&fast::FontTable> {
+        let ix = font_id.0;
+        if self.fast.fonts.len() <= ix {
+            self.fast.fonts.resize_with(ix + 1, || None);
+        }
+        if self.fast.fonts[ix].is_none() {
+            let table = self
+                .fonts
+                .get(ix)
+                .and_then(|info| unsafe { fast_font_table(info) });
+            self.fast.fonts[ix] = Some(table);
+        }
+        self.fast.fonts[ix].as_ref().and_then(Option::as_ref)
+    }
+
+    /// Глиф и ширина символа: старым путём, символ один в строке.
+    fn fast_probe(
+        &mut self,
+        components: &DirectWriteComponents,
+        font_id: FontId,
+        size: f32,
+        ch: char,
+        ix: usize,
+    ) -> Option<fast::Slot> {
+        let font = self.fast_font(font_id)?;
+        let glyph = font.cmap[ix];
+        let mut slot = fast::Slot::Slow;
+        if font.allowed[ix] {
+            let mut buf = [0u8; 4];
+            let s = ch.encode_utf8(&mut buf);
+            let runs = [FontRun {
+                len: s.len(),
+                font_id,
+            }];
+            let layout = self.layout_line_slow(components, s, px(size), &runs).ok()?;
+            if let [run] = &layout.runs[..]
+                && let [g] = &run.glyphs[..]
+                && run.font_id == font_id
+                && g.id.0 == u32::from(glyph)
+                && g.position.x == px(0.0)
+                && g.position.y == px(0.0)
+                && g.index == 0
+                && !g.is_emoji
+            {
+                slot = fast::Slot::Fast {
+                    glyph,
+                    advance: layout.width.as_f32(),
+                };
+            }
+        }
+        let table = self.fast.table(font_id, size);
+        self.fast.tables[table].slots[ix] = slot;
+        Some(slot)
+    }
+
+    /// Простая строка без создания layout; `None` — старым путём. Совпадает со старым путём глиф
+    /// в глиф, кроме разбиения на `ShapedRun`: там строка режется ещё и по скриптам.
+    fn layout_line_fast(
+        &mut self,
+        components: &DirectWriteComponents,
+        text: &str,
+        font_size: Pixels,
+        font_runs: &[FontRun],
+    ) -> Option<LineLayout> {
+        if text.is_empty() || font_runs.iter().any(|r| r.len == 0) {
+            return None;
+        }
+        if font_runs.iter().map(|r| r.len).sum::<usize>() != text.len() {
+            return None;
+        }
+        let first = font_runs.first()?.font_id;
+        self.fast_font(first)?;
+        let base = font_size.as_f32();
+        let mut runs = Vec::with_capacity(font_runs.len());
+        let mut width = 0f32;
+        let mut start = 0usize;
+        for (i, run) in font_runs.iter().enumerate() {
+            let run_text = text.get(start..start + run.len)?;
+            // Как в старом пути: нечётные прогоны чуть крупнее, чтобы рвать лигатуры на стыке.
+            let size = if i % 2 == 1 { base.next_up() } else { base };
+            self.fast_font(run.font_id)?;
+            let mut table = self.fast.table(run.font_id, size);
+            let mut glyphs = Vec::with_capacity(run_text.len());
+            for (at, ch) in run_text.char_indices() {
+                let ix = fast::char_index(ch)?;
+                // Высота строки считается по первому шрифту: символ, которого в нём нет,
+                // поменял бы её через запасной шрифт.
+                if run.font_id != first && self.fast_font(first)?.cmap[ix] == 0 {
+                    return None;
+                }
+                let mut slot = self.fast.tables[table].slots[ix];
+                if matches!(slot, fast::Slot::Unknown) {
+                    slot = self.fast_probe(components, run.font_id, size, ch, ix)?;
+                    table = self.fast.table(run.font_id, size);
+                }
+                let fast::Slot::Fast { glyph, advance } = slot else {
+                    return None;
+                };
+                glyphs.push(ShapedGlyph {
+                    id: GlyphId(u32::from(glyph)),
+                    position: point(px(width), px(0.0)),
+                    index: start + at,
+                    is_emoji: false,
+                });
+                width += advance;
+            }
+            runs.push(ShapedRun {
+                font_id: run.font_id,
+                glyphs,
+            });
+            start += run.len;
+        }
+        let (ascent, descent) = self.fast_metrics(components, first, font_size, text)?;
+        Some(LineLayout {
+            font_size,
+            width: px(width),
+            ascent,
+            descent,
+            runs,
+            len: text.len(),
+        })
+    }
+
+    /// Ascent и descent строки. Старый путь берёт их до применения прогонов, значит это всегда
+    /// первый шрифт; `text` начинается с символа, который в нём есть.
+    fn fast_metrics(
+        &mut self,
+        components: &DirectWriteComponents,
+        font_id: FontId,
+        font_size: Pixels,
+        text: &str,
+    ) -> Option<(Pixels, Pixels)> {
+        let table = self.fast.table(font_id, font_size.as_f32());
+        if let Some(metrics) = self.fast.tables[table].metrics {
+            return Some(metrics);
+        }
+        let ch = text.chars().next()?;
+        let mut buf = [0u8; 4];
+        let s = ch.encode_utf8(&mut buf);
+        let runs = [FontRun {
+            len: s.len(),
+            font_id,
+        }];
+        let layout = self
+            .layout_line_slow(components, s, font_size, &runs)
+            .ok()?;
+        let metrics = (layout.ascent, layout.descent);
+        self.fast.tables[table].metrics = Some(metrics);
+        Some(metrics)
+    }
+
+    fn layout_line_slow(
         &mut self,
         components: &DirectWriteComponents,
         text: &str,
@@ -1959,6 +2131,78 @@ fn is_color_glyph(
 }
 
 const DEFAULT_LOCALE_NAME: PCWSTR = windows::core::w!("en-US");
+
+/// Pets patch: таблица шрифта для быстрого пути `layout_line`; `None` — шрифт старым путём.
+unsafe fn fast_font_table(info: &FontInfo) -> Option<fast::FontTable> {
+    unsafe {
+        // Только функции шрифта по умолчанию: `apply_font_features` кладёт три включённые.
+        let count = info.features.GetFontFeatureCount();
+        if count != 3 {
+            return None;
+        }
+        for i in 0..count {
+            if info.features.GetFontFeature(i).ok()?.parameter != 1 {
+                return None;
+            }
+        }
+        let face = &info.font_face;
+        if face.IsColorFont().as_bool() {
+            return None;
+        }
+        let codepoints: Vec<u32> = fast::all_chars().collect();
+        let mut cmap = Box::new([0u16; fast::CHARS]);
+        face.GetGlyphIndices(
+            codepoints.as_ptr(),
+            codepoints.len() as u32,
+            cmap.as_mut_ptr(),
+        )
+        .log_err()?;
+        let mut line = vec![false; 0x10000];
+        for &g in cmap.iter().filter(|&&g| g != 0) {
+            line[usize::from(g)] = true;
+        }
+        let mut hit = vec![false; 0x10000];
+        let gsub = font_table(face, "GSUB");
+        let gpos = font_table(face, "GPOS");
+        let kern = font_table(face, "kern");
+        fast::scan_tables(
+            gsub.as_deref(),
+            gpos.as_deref(),
+            kern.as_deref(),
+            &line,
+            &mut hit,
+        )?;
+        let mut allowed = Box::new([false; fast::CHARS]);
+        for (slot, &g) in allowed.iter_mut().zip(cmap.iter()) {
+            *slot = g != 0 && !hit[usize::from(g)];
+        }
+        Some(fast::FontTable { cmap, allowed })
+    }
+}
+
+/// Pets patch: копия таблицы шрифта.
+unsafe fn font_table(face: &IDWriteFontFace3, tag: &str) -> Option<Vec<u8>> {
+    unsafe {
+        let mut data = std::ptr::null_mut();
+        let mut size = 0u32;
+        let mut context = std::ptr::null_mut();
+        let mut exists = BOOL(0);
+        face.TryGetFontTable(
+            make_open_type_tag(tag),
+            &raw mut data,
+            &raw mut size,
+            &raw mut context,
+            &raw mut exists,
+        )
+        .ok()?;
+        if !exists.as_bool() {
+            return None;
+        }
+        let table = std::slice::from_raw_parts(data.cast::<u8>(), size as usize).to_vec();
+        face.ReleaseFontTable(context);
+        Some(table)
+    }
+}
 
 #[cfg(test)]
 mod tests {
