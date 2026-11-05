@@ -18,3 +18,4 @@
 | [Тосты вместо модальных окон](toasts.md) | любое | Postman S2-06 |
 | [Темы оформления](themes.md) | любое, Windows | pets-ui, токены Урфина |
 | [Грабли gpui и стенда](gpui-pitfalls.md) | любое, Windows | Урфин G-01…G-07 |
+| [Быстрый путь DirectWrite](dwrite-fast-path.md) | любое, Windows | Урфин S7-36 |
