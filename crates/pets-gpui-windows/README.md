@@ -21,12 +21,14 @@ gpui-pre-windows = { git = "https://github.com/Dicobraz/pets", rev = "<комм�
 | Ленивые текстуры путей: промежуточные текстуры путей (обычная + MSAA 4×, размером с окно) создаются в первом кадре с путями и сбрасываются при ресайзе — окно без путей не держит ~33 МБ (1600×1000), ресайз не копит остатки | `directx_renderer.rs` | `docs/recipes/gpui-pitfalls.md` (Память) |
 | Принудительный WARP (программный Direct3D): `GPUI_FORCE_WARP=1` — устройство создаётся на `EnumWarpAdapter`, без перебора GPU; читается раз за процесс, пересоздание после потери устройства — тоже на WARP | `directx_devices.rs` | — |
 | Платформенный код окна для приложений Pets за нейтральным API (`gpui_windows::pets`): перетаскивание файлов из окна (OLE drag source), значки окна из ресурса exe, снимок окна, уведомление; `unsafe` — только там (без UI — в `pets-shell`). Зависимость `windows-sys` — для этого модуля | `src/pets/`, `gpui_windows.rs`, `Cargo.toml` | `docs/decisions.md` (2026-10-28) |
+| Из gpui-fast (Longbridge, Apache-2.0, `gpui-fast-windows` 0.1.7, `src/fast/`): батчи кадра рисуются через `DrawState` — пайплайн, семплер, текстура и начало батча ставятся, только если изменились; буферы вершин и спрайтов путей живут между кадрами; константный буфер `GlobalParams` пишется, только если изменился; дизеринг градиента от начала его границ (не «шумит» при листании). Под графическим отладчиком (PIX) — старый цикл с метками. Тайлы и композиция gpui-fast не перенесены. Кадр побитно равен старому циклу (тест `pets_fast_frame_matches_upstream_loop`) | `src/pets_fast/`, `directx_renderer.rs`, `shaders.hlsl`, `gpui_windows.rs` | — |
 | Быстрый путь `layout_line`: простая строка (ASCII, Latin-1, кириллица, пунктуация) собирается из таблицы глифов по (шрифт, размер), без `IDWriteTextLayout`; лигатуры, контекстные замены и кернинг отсекает разбор GSUB/GPOS/`kern`, остальное — старым путём. Результат побитно равен старому пути (тесты `pets_fast_*`), 5 мкс вместо 40 на строку | `direct_write.rs`, `direct_write/fast.rs`, `direct_write/fast_tests.rs` | `docs/recipes/dwrite-fast-path.md` |
 
 Тесты нашей части: `cargo test --manifest-path crates/pets-gpui-windows/Cargo.toml --lib --features test-support -- vsync force_warp lazy_path image_sprite background pets_`
 (`lazy_path` рисует путь в скрытом окне через `render_to_image` и проверяет пиксели до и после ресайза;
 `image_sprite` — кадр 2000×1400 больше страницы атласа и кадр, обрезанный маской: на экране нужные пиксели кадра;
-`pets_fast_` — быстрый путь `layout_line` побитно равен старому на корпусе строк, сводка — с `--nocapture`).
+`pets_fast_` — быстрый путь `layout_line` побитно равен старому на корпусе строк, сводка — с `--nocapture`;
+кадр через `DrawState` побитно равен старому циклу, дизеринг градиента сдвигается вместе с ним).
 
 При обновлении gpui-kit: взять новый `gpui-pre-windows` с crates.io, перенести помеченные правки, прогнать тесты,
 бенч и `resize-check` приложения; быстрый путь — по списку из `docs/recipes/dwrite-fast-path.md`. Кадры по запросу и живой ресайз — кандидаты в zed-industries/zed.
