@@ -14,6 +14,8 @@ mod events;
 mod keyboard;
 /// Pets patch: платформенный код приложений Pets за нейтральным API.
 pub mod pets;
+/// Pets patch: улучшения рендера, перенесённые из gpui-fast (Longbridge), Apache-2.0.
+mod pets_fast;
 mod platform;
 mod system_notifications;
 mod system_settings;
