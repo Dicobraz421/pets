@@ -23,8 +23,25 @@ pub struct Sender<'a> {
     pub icon: Option<&'a Path>,
 }
 
-/// Показать уведомление: заголовок и текст.
+/// Звук уведомления (`<audio>` ToastGeneric).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Sound {
+    /// Звук уведомлений Windows по умолчанию.
+    #[default]
+    Default,
+    /// Звук «Новое письмо» (`Notification.Mail`).
+    Mail,
+    /// Без звука: уведомление показывается молча.
+    Silent,
+}
+
+/// Показать уведомление: заголовок и текст, звук по умолчанию.
 pub fn show(sender: &Sender<'_>, title: &str, body: &str) -> io::Result<()> {
+    show_with(sender, title, body, Sound::Default)
+}
+
+/// Показать уведомление со своим звуком (Postman: «Звук „Новое письмо“», выключен — молча).
+pub fn show_with(sender: &Sender<'_>, title: &str, body: &str, sound: Sound) -> io::Result<()> {
     let key = format!(r"Software\Classes\AppUserModelId\{}", sender.aumid);
     let register = || -> windows::core::Result<()> {
         let key = CURRENT_USER.create(&key)?;
@@ -35,7 +52,7 @@ pub fn show(sender: &Sender<'_>, title: &str, body: &str) -> io::Result<()> {
         Ok(())
     };
     register().map_err(|e| com_error("AppUserModelId", e))?;
-    let xml = document(title, body);
+    let xml = document(title, body, sound);
     let run = || -> windows::core::Result<()> {
         let doc = XmlDocument::new()?;
         doc.LoadXml(&HSTRING::from(xml.as_str()))?;
@@ -45,16 +62,21 @@ pub fn show(sender: &Sender<'_>, title: &str, body: &str) -> io::Result<()> {
     run().map_err(|e| com_error("toast", e))
 }
 
-/// XML уведомления ToastGeneric: две строки, текст экранирован.
-fn document(title: &str, body: &str) -> String {
+/// XML уведомления ToastGeneric: две строки, текст экранирован; звук — `<audio>`.
+fn document(title: &str, body: &str, sound: Sound) -> String {
     let esc = |s: &str| {
         s.replace('&', "&amp;")
             .replace('<', "&lt;")
             .replace('>', "&gt;")
             .replace('"', "&quot;")
     };
+    let audio = match sound {
+        Sound::Default => "",
+        Sound::Mail => "<audio src=\"ms-winsoundevent:Notification.Mail\"/>",
+        Sound::Silent => "<audio silent=\"true\"/>",
+    };
     format!(
-        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual></toast>",
+        "<toast><visual><binding template=\"ToastGeneric\"><text>{}</text><text>{}</text></binding></visual>{audio}</toast>",
         esc(title),
         esc(body)
     )
@@ -65,12 +87,24 @@ mod tests {
     /// Разметка из текста пользователя не ломает XML уведомления.
     #[test]
     fn pets_toast_text_is_escaped() {
-        let xml = super::document("A & <b>", "\"x\" > y");
+        let xml = super::document("A & <b>", "\"x\" > y", super::Sound::Default);
         assert!(
             xml.contains("<text>A &amp; &lt;b&gt;</text><text>&quot;x&quot; &gt; y</text>"),
             "{xml}"
         );
         let doc = windows::Data::Xml::Dom::XmlDocument::new().unwrap();
         doc.LoadXml(&windows::core::HSTRING::from(xml.as_str())).unwrap();
+    }
+
+    /// Звук: по умолчанию — без `<audio>`, почта — звук «Новое письмо», молча — `silent`; разметка разбирается.
+    #[test]
+    fn pets_toast_sound() {
+        use super::{Sound, document};
+        assert!(!document("a", "b", Sound::Default).contains("<audio"));
+        assert!(document("a", "b", Sound::Mail).contains("ms-winsoundevent:Notification.Mail"));
+        let silent = document("a", "b", Sound::Silent);
+        assert!(silent.ends_with("<audio silent=\"true\"/></toast>"), "{silent}");
+        let doc = windows::Data::Xml::Dom::XmlDocument::new().unwrap();
+        doc.LoadXml(&windows::core::HSTRING::from(silent.as_str())).unwrap();
     }
 }
