@@ -4,6 +4,7 @@
 //! Крейт без UI. Вывод окна первого экземпляра на передний план — в приложении (`on_args`); здесь —
 //! только право на это (`AllowSetForegroundWindow`). Платформенный код — в `sys`.
 
+pub mod clipboard;
 mod logging;
 mod message;
 mod sys;
