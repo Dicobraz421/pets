@@ -14,6 +14,15 @@ Windows — HTML нет):
 - HTML буфера — чужие данные: разбирает приложение (Postman — в воркере), здесь только байты. Потребитель — Postman
   (вставка таблиц из Word и браузера в письмо); Урфину не нужно.
 
+## 2026-11-11. Патч gpui-kit в pets: блоки в тексте поля (Postman T3-06, T3-07)
+
+Владелец (Postman#562, вариант А): таблицы в письме — сеткой, картинки — своего размера в тексте; поле gpui-kit этого
+не умело (все строки одной высоты, своих элементов в тексте нет). Патч — в `crates/pets-gpui-base`: снимок `gpui-base`
+0.7.3 (Apache-2.0) под прежним именем пакета, подмена через `[patch.crates-io]`, как `pets-gpui-windows`; каталог вне
+рабочей области `pets`. API добавлено, прежнее не менялось: `EditorBlock`, `EditorBlockContext`, `EditorBlockRenderer`,
+`EditorState::set_blocks` / `clear_blocks` — блоки как в Zed (отведённые строки кратны высоте строки). Кандидат в
+upstream (longbridge/gpui-kit). Урфину не нужно (у него свой редактор).
+
 ## 2026-11-09. Звук уведомления Windows (Postman T2-10)
 
 `gpui_windows::pets::toast::show_with(&Sender, title, body, Sound)` — со своим звуком: `Sound::Default` (как прежде),
