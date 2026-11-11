@@ -1,0 +1,29 @@
+[package]
+name = "pets-update"
+description = "Обновление приложений Pets: проверка GitHub Releases, скачивание, подпись minisign, установка MSI и portable — без UI"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+tracing.workspace = true
+semver = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+minisign-verify = "0.3"
+# TLS — системный (SChannel): хранилище сертификатов и корпоративные корни Windows, без своего набора корней;
+# прокси — из настроек Windows.
+ureq = { version = "3", default-features = false, features = ["native-tls-no-default", "win-system-proxy"] }
+zip = { version = "9", default-features = false, features = ["deflate-flate2-zlib-rs"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Win32_Foundation", "Win32_System_Registry"] }
+
+[dev-dependencies]
+minisign = "0.10"
+tempfile = "3"
+
+[lints]
+workspace = true
