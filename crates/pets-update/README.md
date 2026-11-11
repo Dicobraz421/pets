@@ -84,7 +84,7 @@ updater.install(verified, InstallPlan::restart_current()?)?;
 с `--pets-update-apply <job.json>`. Помощник ждёт выхода программы, **заново проверяет подпись** и держит файл
 закрытым от записи, пока идёт установка, пишет `result.json`, удаляет скачанное и запускает программу.
 
-Проба на стенде (настоящая сеть и настоящий помощник, без окон): `cargo run -p pets-update --example probe`.
+Проба на стенде (настоящая сеть и настоящий помощник, без окон): `cargo run -p pets-update --example update_probe`.
 
 ## Групповая политика
 

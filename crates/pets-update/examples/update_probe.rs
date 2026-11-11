@@ -1,8 +1,8 @@
 //! Проба крейта на стенде — то, чего нет в тестах: настоящая сеть и настоящий помощник установки.
 //!
 //! ```text
-//! probe check <owner/repo> <prefix> <текущая версия> [beta]   запрос к GitHub Releases, печать итога
-//! probe prepare <папка>                                        собрать «portable-программу» и подписанный архив
+//! update_probe check <owner/repo> <prefix> <текущая версия> [beta]   запрос к GitHub Releases, печать итога
+//! update_probe prepare <папка>                                        собрать «portable-программу» и подписанный архив
 //! <папка>\app\app.exe apply <папка>                            проверить подпись, запустить помощника, выйти
 //! ```
 //!
@@ -55,7 +55,7 @@ fn main() {
         "prepare" => prepare(Path::new(arg(1))),
         "apply" => apply(product, Path::new(arg(1))),
         "restarted" => restarted(&product, Path::new(arg(1))),
-        _ => eprintln!("usage: probe check <owner/repo> <prefix> <version> [beta] | prepare <dir>"),
+        _ => eprintln!("usage: update_probe check <owner/repo> <prefix> <version> [beta] | prepare <dir>"),
     }
 }
 
