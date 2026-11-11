@@ -120,6 +120,19 @@ impl WrapMap {
         self.wrapper.set_inline_metrics(metrics, cx);
     }
 
+    /// Pets patch (blocks): rows reserved after buffer lines.
+    pub(super) fn set_block_rows(&mut self, rows: std::rc::Rc<[(usize, usize)]>) {
+        self.wrapper.set_block_rows(rows);
+    }
+
+    /// Pets patch (blocks): the wrap row is one reserved for a block (no text, no caret).
+    pub(super) fn is_block_row(&self, wrap_row: usize) -> bool {
+        let line = self.wrap_row_to_buffer_line(wrap_row);
+        let first = self.buffer_line_to_first_wrap_row(line);
+        self.line(line)
+            .is_some_and(|item| item.block_rows > 0 && wrap_row >= first + item.wrapped_lines.len())
+    }
+
     pub(super) fn on_layout_changed(&mut self, wrap_width: Option<Pixels>, cx: &mut App) {
         self.wrapper.set_wrap_width(wrap_width, cx);
     }

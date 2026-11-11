@@ -27,7 +27,7 @@ autobenches = false
 description = "Behavior, interaction, and infrastructure foundations for GPUI applications."
 homepage = "https://gpui-kit.com"
 documentation = "https://docs.rs/gpui-base"
-readme = "README.md"
+readme = "README.upstream.md"
 keywords = [
     "desktop",
     "gpui",

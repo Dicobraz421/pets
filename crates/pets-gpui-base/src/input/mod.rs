@@ -12,6 +12,10 @@ pub(crate) const MASK_CHAR: char = '•';
 
 #[path = "editor/auto_close.rs"]
 mod auto_close;
+// Pets patch: blocks in the text flow.
+#[path = "editor/blocks.rs"]
+mod blocks;
+pub use blocks::{EditorBlock, EditorBlockContext, EditorBlockRenderer};
 mod base;
 #[path = "base/blink_cursor.rs"]
 pub(crate) mod blink_cursor;

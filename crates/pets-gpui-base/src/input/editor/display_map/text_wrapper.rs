@@ -116,6 +116,10 @@ pub(crate) struct LineItem {
     ///
     /// Not contains the line end `\n`.
     pub(crate) wrapped_lines: SmallVec<[Range<usize>; 1]>,
+    /// Pets patch (blocks): empty rows reserved after the text rows of this line for an
+    /// application block ([`crate::input::EditorBlock`]). They count as wrap rows, hold no text,
+    /// and the caret never lands on them.
+    pub(crate) block_rows: usize,
 }
 
 impl LineItem {
@@ -125,10 +129,11 @@ impl LineItem {
         self.len
     }
 
-    /// Get number of soft wrapped lines of this line (include the first line).
+    /// Get number of soft wrapped lines of this line (include the first line), with the
+    /// block rows after them (Pets patch).
     #[inline]
     pub(crate) fn lines_len(&self) -> usize {
-        self.wrapped_lines.len()
+        self.wrapped_lines.len() + self.block_rows
     }
 }
 
@@ -228,6 +233,8 @@ pub(crate) struct TextWrapper {
     pub(crate) lines: SumTree<LineItem>,
 
     inline_metrics: Rc<[(Range<usize>, Pixels)]>,
+    /// Pets patch (blocks): `(buffer line, rows)` reserved after the line, sorted by line.
+    block_rows: Rc<[(usize, usize)]>,
     _initialized: bool,
 }
 
@@ -242,6 +249,7 @@ impl TextWrapper {
             wrapping_indent: WrappingIndent::default(),
             lines: SumTree::new(&()),
             inline_metrics: Rc::from([]),
+            block_rows: Rc::from([]),
             _initialized: false,
         }
     }
@@ -438,6 +446,35 @@ impl TextWrapper {
         );
     }
 
+    /// Pets patch (blocks): reserve `rows` empty rows after each listed buffer line; lines not
+    /// listed get none. Only lines whose reservation changed are touched; wrapping is kept.
+    pub(crate) fn set_block_rows(&mut self, rows: Rc<[(usize, usize)]>) {
+        let wanted = |line: usize| {
+            rows.binary_search_by_key(&line, |(l, _)| *l)
+                .map_or(0, |ix| rows[ix].1)
+        };
+        let changed = self
+            .lines
+            .iter()
+            .enumerate()
+            .any(|(line, item)| item.block_rows != wanted(line));
+        self.block_rows = rows.clone();
+        if !changed {
+            return;
+        }
+        let items: Vec<LineItem> = self
+            .lines
+            .iter()
+            .enumerate()
+            .map(|(line, item)| {
+                let mut item = item.clone();
+                item.block_rows = wanted(line);
+                item
+            })
+            .collect();
+        self.lines = SumTree::from_iter(items, &());
+    }
+
     pub(crate) fn adjust_inline_metrics(&mut self, range: &Range<usize>, new_len: usize) {
         if self.inline_metrics.is_empty() {
             return;
@@ -591,10 +628,17 @@ impl TextWrapper {
                 wrapped_lines.push(prev_boundary_ix..line.len());
             }
 
+            // Pets patch (blocks): rows of an edited line keep the reservation of the line
+            // with that index; the application resets blocks after every change.
+            let block_rows = self
+                .block_rows
+                .binary_search_by_key(&row, |(l, _)| *l)
+                .map_or(0, |ix| self.block_rows[ix].1);
             new_lines.push(LineItem {
                 len: line.len(),
                 indent: indent_chars,
                 wrapped_lines,
+                block_rows,
             });
         }
 
@@ -666,9 +710,9 @@ impl TextWrapper {
             }
         }
 
-        // Otherwise return the eof of the line.
+        // Otherwise return the eof of the line (its last text row: block rows hold no caret).
         let last_range = line.wrapped_lines.last().unwrap_or(&(0..0));
-        let ix = line.lines_len().saturating_sub(1);
+        let ix = line.wrapped_lines.len().saturating_sub(1);
         return WrapDisplayPoint::new(wrapped_row + ix, ix, last_range.len());
     }
 
@@ -749,6 +793,8 @@ pub(crate) struct LineLayout {
     /// Whether any run of this line carries a background color, so [`Self::paint_background`]
     /// can skip the glyph walk for the common case of a line without highlights.
     has_background: bool,
+    /// Pets patch (blocks): empty rows after the text rows ([`LineItem::block_rows`]).
+    pub(crate) block_rows: usize,
 }
 
 impl LineLayout {
@@ -761,7 +807,14 @@ impl LineLayout {
             whitespace_chars: Vec::new(),
             whitespace_indicators: None,
             has_background: false,
+            block_rows: 0,
         }
+    }
+
+    /// Pets patch (blocks): empty rows reserved after the text rows.
+    pub(crate) fn block_rows(mut self, rows: usize) -> Self {
+        self.block_rows = rows;
+        self
     }
 
     /// Record whether any run of this line carries a background color.
@@ -938,6 +991,15 @@ impl LineLayout {
             line_top = line_bottom;
         }
 
+        // Pets patch (blocks): a position on the rows reserved for a block resolves to the
+        // last text row, as if past its end.
+        let blocks_bottom = line_top + last_layout.line_height * self.block_rows as f32;
+        if self.block_rows > 0 && pos.y >= line_top && pos.y < blocks_bottom {
+            let i = self.wrapped_lines.len().checked_sub(1)?;
+            let line = &self.wrapped_lines[i];
+            return Some((i, offset - line.len, pos.x - x_offset - self.line_indent(i)));
+        }
+
         None
     }
 
@@ -1013,7 +1075,7 @@ impl LineLayout {
             .map(|(ix, line)| line.width + self.line_indent(ix))
             .max()
             .unwrap_or(self.longest_width);
-        size(width, self.wrapped_lines.len() * line_height)
+        size(width, (self.wrapped_lines.len() + self.block_rows) * line_height)
     }
 
     /// Paint only the glyph background quads of this line.
@@ -1511,16 +1573,19 @@ mod tests {
                     len: 2,
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..2],
+                    block_rows: 0,
                 },
                 LineItem {
                     len: 4,
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..2, 2..4],
+                    block_rows: 0,
                 },
                 LineItem {
                     len: 1,
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..1],
+                    block_rows: 0,
                 },
             ],
             &(),
@@ -1544,6 +1609,47 @@ mod tests {
         assert_eq!(wrapper.wrap_row_to_buffer_line(2), 1);
         assert_eq!(wrapper.wrap_row_to_buffer_line(3), 2);
         assert_eq!(wrapper.wrap_row_to_buffer_line(4), 2);
+    }
+
+    /// Pets patch (blocks): rows reserved after a line count as wrap rows of that line, hold
+    /// no text, and the line end stays on the last text row.
+    #[test]
+    fn block_rows_are_wrap_rows_without_text() {
+        let mut wrapper = TextWrapper::new(test_font(), px(14.), None);
+        wrapper.text = Rope::from("aa\nbbbb\nc");
+        let item = |len: usize| LineItem {
+            len,
+            indent: 0,
+            wrapped_lines: smallvec::smallvec![0..len],
+            block_rows: 0,
+        };
+        wrapper.lines = SumTree::from_iter(vec![item(2), item(4), item(1)], &());
+        wrapper.set_block_rows(Rc::from([(1, 3)]));
+        assert_eq!(wrapper.len(), 6);
+        assert_eq!(wrapper.buffer_line_to_wrap_row_range(1), 1..5);
+        assert_eq!(wrapper.buffer_line_to_first_wrap_row(2), 5);
+        assert_eq!(wrapper.wrap_row_to_buffer_line(4), 1);
+        // The end of "bbbb" is drawn on its text row, not on a reserved one.
+        assert_eq!(wrapper.offset_to_display_point(7).row, 1);
+        // A reserved row resolves to the end of its line.
+        assert_eq!(wrapper.display_point_to_offset(WrapDisplayPoint::new(3, 0, 2)), 7);
+        // Same reservation again — nothing changes; none — rows are gone.
+        wrapper.set_block_rows(Rc::from([(1, 3)]));
+        assert_eq!(wrapper.len(), 6);
+        wrapper.set_block_rows(Rc::from([]));
+        assert_eq!(wrapper.len(), 3);
+    }
+
+    /// Pets patch (blocks): a position on the reserved rows hits the last text row.
+    #[test]
+    fn block_rows_extend_the_line_layout() {
+        let last_layout = test_last_layout(px(20.));
+        let mut line_layout = LineLayout::new().block_rows(2);
+        line_layout.set_wrapped_lines(smallvec::smallvec![ShapedLine::default()]);
+        assert_eq!(line_layout.size(px(20.)).height, px(60.));
+        let at = |y: f32| line_layout.closest_index_for_position(gpui::point(px(0.), px(y)), &last_layout);
+        assert!(at(45.).is_some());
+        assert!(at(65.).is_none());
     }
 
     #[test]
@@ -1682,11 +1788,13 @@ mod tests {
                     len: Rope::from("first line").len(),
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..10],
+                    block_rows: 0,
                 },
                 LineItem {
                     len: Rope::from("this one wraps").len(),
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..9, 9..14],
+                    block_rows: 0,
                 },
             ],
             &(),
@@ -1738,24 +1846,28 @@ mod tests {
                     len: Rope::from("Hello, 世界!\r").len(),
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..15],
+                    block_rows: 0,
                 },
                 // range: 16..36
                 LineItem {
                     len: Rope::from("This is second line.\n").len(),
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..10, 10..20],
+                    block_rows: 0,
                 },
                 // range: 37..56
                 LineItem {
                     len: Rope::from("This is third line.\n").len(),
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..9, 9..15, 15..20],
+                    block_rows: 0,
                 },
                 // range: 57..79
                 LineItem {
                     len: Rope::from("这里是第 4 行。").len(),
                     indent: 0,
                     wrapped_lines: smallvec::smallvec![0..22],
+                    block_rows: 0,
                 },
             ],
             &(),
