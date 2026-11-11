@@ -2,6 +2,18 @@
 
 Новое решение — сверху, с датой.
 
+## 2026-11-11. pets-shell: HTML в буфере обмена (Postman T3-06)
+
+Владелец: «Не делай двойную работу, пиши буфер как следует» — чтение `CF_HTML` не в приложении, а здесь. Буфер обмена
+gpui отдаёт только текст, картинки и файлы. API добавлено, прежнее не менялось (`pets_shell::clipboard`, все ОС; не
+Windows — HTML нет):
+- `read_html(max) -> Result<Option<Html>, ShellError>` — фрагмент `StartFragment…EndFragment` и `SourceURL`;
+  `has_html()`; `write_html(fragment, text, source_url)` — `CF_HTML` и `CF_UNICODETEXT` разом (копирование с
+  форматированием).
+- Без ОС: `parse_cf_html(&[u8]) -> Option<Html>`, `encode_cf_html(fragment, source_url) -> Vec<u8>`, `DEFAULT_MAX`.
+- HTML буфера — чужие данные: разбирает приложение (Postman — в воркере), здесь только байты. Потребитель — Postman
+  (вставка таблиц из Word и браузера в письмо); Урфину не нужно.
+
 ## 2026-11-11. Патч gpui-kit в pets: блоки в тексте поля (Postman T3-06, T3-07)
 
 Владелец (Postman#562, вариант А): таблицы в письме — сеткой, картинки — своего размера в тексте; поле gpui-kit этого
@@ -9,7 +21,7 @@
 0.7.3 (Apache-2.0) под прежним именем пакета, подмена через `[patch.crates-io]`, как `pets-gpui-windows`; каталог вне
 рабочей области `pets`. API добавлено, прежнее не менялось: `EditorBlock`, `EditorBlockContext`, `EditorBlockRenderer`,
 `EditorState::set_blocks` / `clear_blocks` — блоки как в Zed (отведённые строки кратны высоте строки). Кандидат в
-upstream (longbridge/gpui-kit). Урфину не нужно (своё поле на egui).
+upstream (longbridge/gpui-kit). Урфину не нужно (у него свой редактор).
 
 ## 2026-11-09. Звук уведомления Windows (Postman T2-10)
 
