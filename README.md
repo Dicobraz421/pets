@@ -42,4 +42,4 @@ pets-commands = { git = "https://github.com/Dicobraz/pets", rev = "<коммит
 Совместная правка приложения и `pets` — локальный `[patch."https://github.com/Dicobraz/pets"]` на путь,
 в коммит не попадает.
 
-Лицензия — MIT OR Apache-2.0.
+Лицензия — проприетарная, все права защищены ([LICENSE](LICENSE)). Крейты `pets-gpui-base` и `pets-gpui-windows` — код gpui под Apache-2.0.

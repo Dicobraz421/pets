@@ -7,7 +7,7 @@ exclude = ["crates/pets-gpui-windows", "crates/pets-gpui-base"]
 [workspace.package]
 edition = "2024"
 version = "0.1.0"
-license = "MIT OR Apache-2.0"
+license = "LicenseRef-Proprietary"
 repository = "https://github.com/Dicobraz/pets"
 
 [workspace.dependencies]
