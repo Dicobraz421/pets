@@ -1,5 +1,5 @@
 //! Платформенный код: единственный экземпляр, журнал событий ОС, реестр, учётные данные, стандартные потоки, разбивка
-//! памяти. `unsafe` — только здесь.
+//! памяти, буфер обмена (HTML). `unsafe` — только здесь.
 
 #[cfg(windows)]
 mod windows;
@@ -11,6 +11,8 @@ mod other;
 #[cfg(not(windows))]
 pub(crate) use other::*;
 
+#[cfg(windows)]
+pub(crate) mod clipboard;
 #[cfg(windows)]
 pub mod console;
 #[cfg(windows)]
