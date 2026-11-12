@@ -20,6 +20,7 @@ pub(crate) use other::*;
 pub(crate) enum Signal {
     /// Тема, акцент или контрастность ОС.
     Look,
-    /// Файлы в папке тем пользователя.
+    /// Файлы в папке тем пользователя. Следит за папкой пока только Windows; на macOS — только вид ОС.
+    #[cfg_attr(not(windows), allow(dead_code))]
     Dir,
 }
