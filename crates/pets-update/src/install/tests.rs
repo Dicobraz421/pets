@@ -389,3 +389,28 @@ fn links_stay_inside_archive() {
     ));
     assert!(!link_inside(Path::new("link"), Path::new("/etc/passwd")));
 }
+
+/// Unix: файл переписали после проверки подписи — ставится проверенное, а не новое содержимое (PAR-AUDIT #12).
+#[cfg(not(windows))]
+#[test]
+fn payload_is_the_verified_copy() {
+    let s = signed_job(InstallKind::Portable);
+    let signature = fs::read_to_string(&s.job.signature).unwrap();
+    let mut payload = verify::verify_file(&[&s.key], &s.job.name, &s.job.file, &signature).unwrap();
+    fs::write(&s.job.file, b"evil bytes, longer than the original").unwrap();
+    let mut got = Vec::new();
+    payload.read_to_end(&mut got).unwrap();
+    assert_eq!(got, b"installer bytes");
+}
+
+/// Unix: ссылка вместо скачанного файла — отказ.
+#[cfg(not(windows))]
+#[test]
+fn payload_rejects_link() {
+    let s = signed_job(InstallKind::Portable);
+    let real = s.job.dir.join("real");
+    fs::rename(&s.job.file, &real).unwrap();
+    std::os::unix::fs::symlink(&real, &s.job.file).unwrap();
+    let signature = fs::read_to_string(&s.job.signature).unwrap();
+    assert!(verify::verify_file(&[&s.key], &s.job.name, &s.job.file, &signature).is_err());
+}
