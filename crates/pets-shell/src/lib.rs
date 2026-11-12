@@ -17,6 +17,11 @@ pub use logging::{fatal, init_logging};
 #[cfg(windows)]
 pub use sys::{console, credentials, memory, registry, volume};
 
+/// macOS (Postman MAC-02): Связка ключей (тот же API `credentials`, что на Windows), поток ошибок процесса без
+/// терминала — в файл (`console::stderr_to_file`), обработчик схемы адресов по умолчанию (`url_scheme`, LaunchServices).
+#[cfg(target_os = "macos")]
+pub use sys::{console, credentials, url_scheme};
+
 /// Ошибка оболочки процесса.
 #[derive(Debug, thiserror::Error)]
 pub enum ShellError {
@@ -77,7 +82,8 @@ impl Listener {
 /// Единственный экземпляр: Windows — именованный mutex `Local\Pets.<app>` + named pipe
 /// `\\.\pipe\Pets.<app>.<session id>`. Второй экземпляр передаёт свои аргументы первому и получает `Second`
 /// (приложение выходит с кодом 0). Перед передачей — `AllowSetForegroundWindow(pid первого)`
-/// (`GetNamedPipeServerProcessId`), чтобы первый смог вывести окно на передний план. Не Windows — всегда `First`.
+/// (`GetNamedPipeServerProcessId`), чтобы первый смог вывести окно на передний план. macOS — замок файла и unix-сокет
+/// в `$TMPDIR` пользователя. Другие ОС — всегда `First`.
 ///
 /// Ошибка — приложение работает как первый экземпляр и пишет предупреждение. Относительные пути в `args`
 /// второй экземпляр раскрывает сам: каталог у первого другой.

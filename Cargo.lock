@@ -4685,6 +4685,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "pets-gpui-macos"
+version = "0.1.0"
+dependencies = [
+ "block2 0.6.2",
+ "objc2 0.6.5",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
+ "objc2-user-notifications",
+ "raw-window-handle",
+ "tracing",
+]
+
+[[package]]
 name = "pets-i18n"
 version = "0.1.0"
 dependencies = [
@@ -4700,6 +4713,9 @@ dependencies = [
 name = "pets-shell"
 version = "0.1.0"
 dependencies = [
+ "core-foundation 0.10.1",
+ "libc",
+ "security-framework",
  "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
