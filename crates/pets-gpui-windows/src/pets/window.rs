@@ -18,8 +18,9 @@ use windows_sys::Win32::System::LibraryLoader::{
     FindResourceW, GetModuleHandleW, LoadResource, LockResource, SizeofResource,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GetClientRect, GetSystemMetrics, ICON_BIG, ICON_SMALL, IMAGE_ICON, LR_DEFAULTCOLOR, LoadImageW,
-    PW_RENDERFULLCONTENT, RT_GROUP_ICON, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SendMessageW, WM_SETICON,
+    GetClientRect, GetSystemMetrics, ICON_BIG, ICON_SMALL, IMAGE_ICON, IsIconic, IsWindowVisible, LR_DEFAULTCOLOR,
+    LoadImageW, PW_RENDERFULLCONTENT, RT_GROUP_ICON, SM_CXICON, SM_CXSMICON, SM_CYICON, SM_CYSMICON, SW_HIDE,
+    SW_RESTORE, SW_SHOW, SendMessageW, ShowWindowAsync, WM_SETICON,
 };
 
 use super::last_error;
@@ -37,6 +38,28 @@ pub fn id(window: &gpui::Window) -> io::Result<isize> {
             format!("not a Win32 window: {other:?}"),
         )),
     }
+}
+
+/// Спрятать окно: с экрана и с панели задач (приложение остаётся значком в трее — [`super::tray`]). Асинхронно:
+/// сообщения окну придут после выхода из обработчика gpui, без повторного входа в его оконную процедуру.
+pub fn hide(window: &gpui::Window) -> io::Result<()> {
+    // SAFETY: окно процесса; указателей нет.
+    unsafe { ShowWindowAsync(id(window)? as HWND, SW_HIDE) };
+    Ok(())
+}
+
+/// Показать спрятанное (или развернуть свёрнутое) окно. Вывести вперёд — `Window::activate_window` после.
+pub fn show(window: &gpui::Window) -> io::Result<()> {
+    let hwnd = id(window)? as HWND;
+    // SAFETY: окно процесса; указателей нет.
+    unsafe { ShowWindowAsync(hwnd, if IsIconic(hwnd) != 0 { SW_RESTORE } else { SW_SHOW }) };
+    Ok(())
+}
+
+/// Окно на экране или свёрнуто на панель задач (не спрятано [`hide`]).
+pub fn is_visible(window: &gpui::Window) -> bool {
+    // SAFETY: окно процесса; указателей нет.
+    id(window).is_ok_and(|hwnd| unsafe { IsWindowVisible(hwnd as HWND) } != 0)
 }
 
 /// Значки окна: большой (`SM_CXICON`: Alt+Tab) и малый (`SM_CXSMICON`: заголовок, панель задач) — каждый своего

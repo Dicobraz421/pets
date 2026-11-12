@@ -1,13 +1,17 @@
 //! Уведомление центра уведомлений Windows от имени приложения без ярлыка в «Пуске»: AUMID регистрируется в
 //! `HKCU\Software\Classes\AppUserModelId\<aumid>` (имя и значок), процессу AUMID не ставится — группировка окон на
-//! панели задач не меняется (в отличие от `App::set_app_identity` gpui).
+//! панели задач не меняется (в отличие от `App::set_app_identity` gpui). Щелчок по уведомлению ([`show_clickable`])
+//! приходит, пока процесс жив: из центра уведомлений после перезапуска приложения — нет (нужен COM-активатор).
 
+use std::collections::VecDeque;
 use std::io;
 use std::path::Path;
+use std::sync::{Mutex, PoisonError};
 
 use windows::Data::Xml::Dom::XmlDocument;
+use windows::Foundation::TypedEventHandler;
 use windows::UI::Notifications::{ToastNotification, ToastNotificationManager};
-use windows::core::HSTRING;
+use windows::core::{HSTRING, IInspectable};
 
 use windows_registry::CURRENT_USER;
 
@@ -42,6 +46,33 @@ pub fn show(sender: &Sender<'_>, title: &str, body: &str) -> io::Result<()> {
 
 /// Показать уведомление со своим звуком (Postman: «Звук „Новое письмо“», выключен — молча).
 pub fn show_with(sender: &Sender<'_>, title: &str, body: &str, sound: Sound) -> io::Result<()> {
+    show_inner(sender, title, body, sound, None)
+}
+
+/// Уведомления со щелчком, которые ещё могут быть на экране или в центре уведомлений: обработчик живёт, пока жив
+/// объект уведомления. Старые вытесняются.
+static CLICKABLE: Mutex<VecDeque<ToastNotification>> = Mutex::new(VecDeque::new());
+const KEEP: usize = 16;
+
+/// Показать уведомление и узнать о щелчке по нему. `on_click` вызывается из потока Windows, не интерфейса:
+/// в нём — только передать событие дальше (канал в задачу интерфейса).
+pub fn show_clickable(
+    sender: &Sender<'_>,
+    title: &str,
+    body: &str,
+    sound: Sound,
+    on_click: impl Fn() + Send + 'static,
+) -> io::Result<()> {
+    show_inner(sender, title, body, sound, Some(Box::new(on_click)))
+}
+
+fn show_inner(
+    sender: &Sender<'_>,
+    title: &str,
+    body: &str,
+    sound: Sound,
+    on_click: Option<Box<dyn Fn() + Send>>,
+) -> io::Result<()> {
     let key = format!(r"Software\Classes\AppUserModelId\{}", sender.aumid);
     let register = || -> windows::core::Result<()> {
         let key = CURRENT_USER.create(&key)?;
@@ -57,6 +88,19 @@ pub fn show_with(sender: &Sender<'_>, title: &str, body: &str, sound: Sound) -> 
         let doc = XmlDocument::new()?;
         doc.LoadXml(&HSTRING::from(xml.as_str()))?;
         let toast = ToastNotification::CreateToastNotification(&doc)?;
+        if let Some(on_click) = on_click {
+            toast.Activated(&TypedEventHandler::<ToastNotification, IInspectable>::new(
+                move |_, _| {
+                    on_click();
+                    Ok(())
+                },
+            ))?;
+            let mut kept = CLICKABLE.lock().unwrap_or_else(PoisonError::into_inner);
+            if kept.len() >= KEEP {
+                kept.pop_front();
+            }
+            kept.push_back(toast.clone());
+        }
         ToastNotificationManager::CreateToastNotifierWithId(&HSTRING::from(sender.aumid))?.Show(&toast)
     };
     run().map_err(|e| com_error("toast", e))
