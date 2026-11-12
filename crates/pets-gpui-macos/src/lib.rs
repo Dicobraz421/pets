@@ -9,8 +9,11 @@
 //! - [`window`] — номер окна (`CGWindowID`) и снимок окна без тени (ScreenCaptureKit; macOS 13 — CoreGraphics);
 //! - [`drag`] — перетаскивание файлов из окна в Finder и другие приложения (`NSDraggingSession`), копии во временном
 //!   каталоге приложения;
-//! - [`toast`] — уведомление центра уведомлений (`UNUserNotificationCenter`); нужен `.app` с идентификатором пакета.
+//! - [`toast`] — уведомление центра уведомлений (`UNUserNotificationCenter`); нужен `.app` с идентификатором пакета;
+//! - [`dock`] — бейдж на значке в Dock (`NSDockTile`), например число непрочитанных.
 
+#[cfg(target_os = "macos")]
+pub mod dock;
 #[cfg(target_os = "macos")]
 pub mod drag;
 #[cfg(target_os = "macos")]
