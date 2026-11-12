@@ -19,3 +19,4 @@
   Полный clippy, nextest и doc-тесты — только CI (Windows, required check `gate`), локально не дублировать.
 - Изменение публичного API крейта — запись в `docs/decisions.md` и проверка обоих потребителей.
 - Ошибки — thiserror; логи — tracing; без `unwrap`/`expect` вне тестов.
+- Журнал: уровень события — по `crates/pets-shell/LOGGING.md` (ERROR — ожидаемое не случилось, WARN — запасной путь, INFO — редкие вехи, остальное DEBUG); системный журнал — только `pets_shell::SystemLog`; без паролей, токенов и содержимого.
