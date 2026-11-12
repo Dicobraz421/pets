@@ -6,7 +6,7 @@
 //! `unsafe` — только здесь, у каждого блока — `SAFETY`. Ошибки — `std::io::Error`, без типов objc2 в сигнатурах;
 //! окно — любое `HasWindowHandle` (`gpui::Window`) или его номер ([`window::id`]) для другого потока.
 //!
-//! - [`window`] — номер окна (`CGWindowID`) и снимок окна без рамки и тени (CoreGraphics);
+//! - [`window`] — номер окна (`CGWindowID`) и снимок окна без тени (ScreenCaptureKit; macOS 13 — CoreGraphics);
 //! - [`drag`] — перетаскивание файлов из окна в Finder и другие приложения (`NSDraggingSession`), копии во временном
 //!   каталоге приложения;
 //! - [`toast`] — уведомление центра уведомлений (`UNUserNotificationCenter`); нужен `.app` с идентификатором пакета.

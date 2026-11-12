@@ -77,13 +77,58 @@ pub fn encode_cf_html(fragment: &str, source_url: Option<&str>) -> Vec<u8> {
     out
 }
 
+/// Разобрать `public.html` macOS: между `<!--StartFragment-->` и `<!--EndFragment-->` (Word), иначе содержимое
+/// `<body>`, иначе весь документ; ведущие `<meta …>` (Safari пишет `<meta charset='utf-8'>`) отбрасываются. Пустой —
+/// `None`. Адреса источника в буфере macOS нет.
+pub fn parse_mac_html(raw: &str) -> Option<Html> {
+    let lower = raw.to_ascii_lowercase();
+    let between = |open: &str, close: &str| -> Option<&str> {
+        let a = lower.find(open)? + open.len();
+        let b = a + lower[a..].find(close)?;
+        Some(&raw[a..b])
+    };
+    let body = || -> Option<&str> {
+        let tag = lower.find("<body")?;
+        let a = tag + lower[tag..].find('>')? + 1;
+        let b = lower.rfind("</body>").filter(|&b| b >= a).unwrap_or(raw.len());
+        Some(&raw[a..b])
+    };
+    let mut fragment = between("<!--startfragment-->", "<!--endfragment-->")
+        .or_else(body)
+        .unwrap_or(raw)
+        .trim();
+    while fragment.get(..5).is_some_and(|h| h.eq_ignore_ascii_case("<meta")) {
+        match fragment.find('>') {
+            Some(end) => fragment = fragment[end + 1..].trim_start(),
+            None => break,
+        }
+    }
+    let fragment = fragment.trim();
+    (!fragment.is_empty()).then(|| Html {
+        fragment: fragment.to_owned(),
+        source_url: None,
+    })
+}
+
+/// Собрать `public.html` macOS из фрагмента: документ UTF-8 с `<!--StartFragment-->…<!--EndFragment-->` (так его
+/// узнают Word и Pages).
+pub fn encode_mac_html(fragment: &str) -> String {
+    format!(
+        "<html><head><meta charset=\"utf-8\"></head><body><!--StartFragment-->{fragment}<!--EndFragment--></body></html>"
+    )
+}
+
 /// В буфере обмена есть HTML (кнопка «Вставить с форматированием», меню).
 pub fn has_html() -> bool {
     #[cfg(windows)]
     {
         crate::sys::clipboard::has_html()
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        crate::sys::clipboard::has_html(&crate::sys::clipboard::general())
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         false
     }
@@ -96,26 +141,39 @@ pub fn read_html(max: usize) -> Result<Option<Html>, ShellError> {
     {
         Ok(crate::sys::clipboard::read_html(max)?.and_then(|raw| parse_cf_html(&raw)))
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        let pb = crate::sys::clipboard::general();
+        Ok(crate::sys::clipboard::read_html(&pb, max).and_then(|raw| parse_mac_html(&raw)))
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = max;
         Ok(None)
     }
 }
 
-/// Положить в буфер обмена HTML-фрагмент и его текст (`CF_HTML` и `CF_UNICODETEXT` разом): Word и Outlook вставят
-/// с форматированием, Блокнот — текст. Прежнее содержимое буфера заменяется.
+/// Положить в буфер обмена HTML-фрагмент и его текст (`CF_HTML` и `CF_UNICODETEXT` разом; macOS — `public.html` и
+/// `public.utf8-plain-text`): Word и Outlook вставят с форматированием, Блокнот и TextEdit — текст. Прежнее
+/// содержимое буфера заменяется.
 pub fn write_html(fragment: &str, text: &str, source_url: Option<&str>) -> Result<(), ShellError> {
     #[cfg(windows)]
     {
         crate::sys::clipboard::write(&encode_cf_html(fragment, source_url), text)
     }
-    #[cfg(not(windows))]
+    #[cfg(target_os = "macos")]
+    {
+        // Поля адреса источника у `public.html` нет.
+        let _ = source_url;
+        let pb = crate::sys::clipboard::general();
+        crate::sys::clipboard::write(&pb, &encode_mac_html(fragment), text)
+    }
+    #[cfg(not(any(windows, target_os = "macos")))]
     {
         let _ = (fragment, text, source_url);
         Err(ShellError::Invalid {
             what: "clipboard",
-            reason: "HTML clipboard is Windows only",
+            reason: "HTML clipboard is Windows and macOS only",
         })
     }
 }
@@ -170,6 +228,39 @@ mod tests {
         );
         assert_eq!(parse_cf_html(b""), None);
         assert_eq!(parse_cf_html(b"Version:0.9\r\n"), None);
+    }
+
+    /// macOS (MAC-04): Word — фрагмент между отметками, Safari — `<meta charset>` без `<body>`, просто `<body>`;
+    /// своё (`encode_mac_html`) — туда и обратно.
+    #[test]
+    fn parse_mac_documents() {
+        let word = "<html xmlns:o=\"urn:x\"><head><style>td{}</style></head><body lang=RU>
+<!--StartFragment--><table><tr><td>Ж</td></tr></table><!--EndFragment-->
+</body></html>";
+        assert_eq!(
+            parse_mac_html(word).unwrap().fragment,
+            "<table><tr><td>Ж</td></tr></table>"
+        );
+        let safari = "<meta charset='utf-8'><span style=\"color: red\">Город</span>";
+        assert_eq!(
+            parse_mac_html(safari).unwrap(),
+            Html {
+                fragment: "<span style=\"color: red\">Город</span>".into(),
+                source_url: None
+            }
+        );
+        assert_eq!(
+            parse_mac_html("<HTML><BODY class=x><p>a</p></BODY></HTML>")
+                .unwrap()
+                .fragment,
+            "<p>a</p>"
+        );
+        assert_eq!(
+            parse_mac_html(&encode_mac_html("<b>Ж</b>")).unwrap().fragment,
+            "<b>Ж</b>"
+        );
+        assert_eq!(parse_mac_html("  <meta charset='utf-8'>  "), None);
+        assert_eq!(parse_mac_html(""), None);
     }
 
     /// Буфер Windows: записали HTML и текст — прочитали тот же фрагмент. Буфер общий для рабочего стола, поэтому

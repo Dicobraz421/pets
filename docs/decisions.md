@@ -2,6 +2,26 @@
 
 Новое решение — сверху, с датой.
 
+## 2026-11-12. macOS: буфер HTML, снимок ScreenCaptureKit, тема, объект входа, политики (Postman MAC-04)
+
+Владелец (Postman `docs/decisions/2026-11-11-macos.md`, волна MAC-04 — класс B, одобрена 2026-11-12). API добавлено,
+прежнее не менялось; Windows не меняется:
+- `pets_shell::clipboard` на macOS — `public.html` (`NSPasteboardTypeHTML`) и текст: `read_html`, `has_html`,
+  `write_html` работают и там; без ОС — `parse_mac_html(&str)`, `encode_mac_html(fragment)` (документ без
+  заголовка `CF_HTML`: Word — с отметками фрагмента, Safari — `<meta charset>` без `<body>`).
+- `pets_shell::login_item` (macOS 13+): `state()`, `set(on)`, `open_settings()` — `SMAppService.mainApp`.
+- `pets_shell::managed::get(key)` (macOS): принудительное значение профиля конфигурации для пакета приложения —
+  аналог `Software\Policies` (свои `defaults write` пользователя не считаются).
+- `pets_shell::memory::phys_footprint()` (macOS) — «Память» Мониторинга системы, для бенча.
+- `pets_gpui_macos::window::capture` — ScreenCaptureKit на macOS 14.4+ (окна своего процесса без разрешения «Запись
+  экрана»), на 13 — 14.3 и при отказе — CoreGraphics; `toast::show_clickable(title, body, sound, on_click)`.
+- `pets-ui` тема на macOS: светлая/тёмная — `AppleInterfaceStyle`, акцент — `NSColor.controlAccentColor`, политика
+  `Theme`/`AllowThemeChange` — профиль конфигурации; смена — распределённые уведомления. Папка тем на macOS не
+  отслеживается (новые файлы — со следующего запуска).
+- Mac-job в CI pets нет: сборка — `cargo clippy --target aarch64-apple-darwin` (pets-ui — с gpui, только на маке),
+  проверка на маке — CI `macOS` Postman; тесты pets для macOS (`unique_pasteboard_round_trip` на своём буфере,
+  `footprint_is_reported`, …) — до mac-job pets (Postman MAC-06) не запускаются.
+
 ## 2026-11-12. pets-gpui-windows: значок в трее, спрятать окно, щелчок по уведомлению (Postman T3-13)
 
 Владелец (Postman `docs/decisions/2026-11-12-tray-and-notifications.md`): закрытие окна сворачивает приложение в трей,

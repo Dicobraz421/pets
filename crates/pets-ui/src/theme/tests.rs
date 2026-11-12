@@ -569,6 +569,7 @@ fn texts_for_builtin_titles_exist() {
     let ftl = include_str!("../../i18n/ru.ftl");
     for key in [
         "pets-ui-theme-system",
+        "pets-ui-theme-system-mac",
         "pets-ui-theme-fluent-light",
         "pets-ui-theme-fluent-dark",
         "pets-ui-theme-high-contrast",

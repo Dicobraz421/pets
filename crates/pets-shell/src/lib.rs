@@ -19,8 +19,10 @@ pub use sys::{console, credentials, memory, registry, volume};
 
 /// macOS (Postman MAC-02): Связка ключей (тот же API `credentials`, что на Windows), поток ошибок процесса без
 /// терминала — в файл (`console::stderr_to_file`), обработчик схемы адресов по умолчанию (`url_scheme`, LaunchServices).
+/// MAC-04: запуск при входе (`login_item`, `SMAppService`), управляемые настройки — политики профилей конфигурации
+/// (`managed`, `CFPreferences`), память процесса для бенча (`memory::phys_footprint`).
 #[cfg(target_os = "macos")]
-pub use sys::{console, credentials, url_scheme};
+pub use sys::{console, credentials, login_item, managed, memory, url_scheme};
 
 /// Ошибка оболочки процесса.
 #[derive(Debug, thiserror::Error)]
