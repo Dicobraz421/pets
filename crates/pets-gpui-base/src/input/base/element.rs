@@ -1151,6 +1151,8 @@ impl<M: InputModeKind> TextElement<M> {
                 offset = end;
                 y += last_layout.line_height;
             }
+            // Pets patch (blocks): rows reserved after the line.
+            y += last_layout.line_height * line.block_rows as f32;
         }
         (!corners.is_empty()).then_some(corners)
     }
@@ -1774,7 +1776,7 @@ impl<M: InputModeKind> TextElement<M> {
                     });
                 }
 
-                offset_y += line.wrapped_lines.len() * last_layout.line_height;
+                offset_y += line.size(last_layout.line_height).height;
             }
 
             infos
@@ -2466,6 +2468,106 @@ impl<M: InputModeKind> TextElement<M> {
             .collect()
     }
 
+    /// Pets patch: lay out the blocks whose rows are in view ([`super::EditorBlock`]).
+    fn prepaint_blocks(
+        &self,
+        layout: &LastLayout,
+        bounds: Bounds<Pixels>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Vec<AnyElement> {
+        let state = self.state.read(cx);
+        let blocks = state.blocks.blocks.clone();
+        let Some(renderer) = state.blocks.renderer.clone() else {
+            return vec![];
+        };
+        if blocks.is_empty() || layout.visible_buffer_lines.is_empty() {
+            return vec![];
+        }
+        let line_height = layout.line_height;
+        // Top of every visible line, in the coordinates the lines are painted in.
+        let mut tops = Vec::with_capacity(layout.visible_buffer_lines.len());
+        let mut y = layout.visible_top;
+        for (ix, &line) in layout.visible_buffer_lines.iter().enumerate() {
+            tops.push((line, y));
+            y += layout.lines[ix].size(line_height).height;
+        }
+        let rows_of = |line: usize| {
+            state
+                .display_map
+                .visible_wrap_row_count_for_buffer_line(line) as f32
+        };
+        let text_rows_of = |line: usize| {
+            state
+                .display_map
+                .line(line)
+                .map_or(1, |item| item.wrapped_lines.len()) as f32
+        };
+        let width = if layout.content_width > px(0.) {
+            layout.content_width
+        } else {
+            bounds.size.width - layout.line_number_width
+        };
+        let mut placed = Vec::new();
+        for block in blocks.iter() {
+            // A visible line of the block, and the top of its first line from it.
+            let Some(&(seen, seen_top)) = tops
+                .iter()
+                .find(|(line, _)| block.lines.contains(line))
+            else {
+                continue;
+            };
+            let above: f32 = (block.lines.start..seen).map(rows_of).sum();
+            let first_top = seen_top - line_height * above;
+            let mut line_tops = Vec::with_capacity(block.lines.len());
+            let mut top = first_top;
+            for line in block.lines.clone() {
+                line_tops.push(top - first_top);
+                top += line_height * rows_of(line);
+            }
+            let last = block.lines.end - 1;
+            let (block_top, height) = if block.cover {
+                (first_top, top - first_top)
+            } else {
+                let last_top = first_top + line_tops.last().copied().unwrap_or_default();
+                (
+                    last_top + line_height * text_rows_of(last),
+                    line_height * block.extra_rows as f32,
+                )
+            };
+            if height <= px(0.) {
+                continue;
+            }
+            let origin = bounds.origin + point(layout.line_number_width, block_top);
+            let context = super::EditorBlockContext {
+                id: block.id,
+                bounds: Bounds::new(origin, size(width, height)),
+                line_tops: if block.cover {
+                    line_tops
+                } else {
+                    Vec::new()
+                },
+                line_height,
+            };
+            placed.push(context);
+        }
+        let mut out = Vec::with_capacity(placed.len());
+        for context in placed {
+            let mut element = renderer(&context, window, cx);
+            element.layout_as_root(
+                size(
+                    gpui::AvailableSpace::Definite(context.bounds.size.width),
+                    gpui::AvailableSpace::Definite(context.bounds.size.height),
+                ),
+                window,
+                cx,
+            );
+            element.prepaint_at(context.bounds.origin, window, cx);
+            out.push(element);
+        }
+        out
+    }
+
     /// Asks the scroll containers around a focused input to bring it into
     /// view, once when it gains focus and again whenever the fully visible
     /// part of the window changes, so manual scrolling in between is left
@@ -2722,6 +2824,7 @@ impl<M: InputModeKind> TextElement<M> {
 
             let line_layout = LineLayout::new()
                 .lines(wrapped_lines)
+                .block_rows(line_item.block_rows)
                 .wrap_indent(wrap_indent)
                 .with_background(line_has_background)
                 .with_whitespaces(whitespace_indicators.clone());
@@ -2898,6 +3001,8 @@ pub(super) struct PrepaintState {
     /// The lines of entire lines.
     last_layout: LastLayout,
     token_elements: Vec<AnyElement>,
+    /// Pets patch: elements of the blocks in view.
+    block_elements: Vec<AnyElement>,
     /// The lines only contains the visible lines in the viewport, based on `visible_range`.
     ///
     /// The child is the soft lines.
@@ -3620,7 +3725,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
                         .text_system()
                         .shape_line(line_no, text_size, &runs, None),
                 );
-                for _ in 0..line.wrapped_lines.len().saturating_sub(1) {
+                for _ in 0..(line.wrapped_lines.len() + line.block_rows).saturating_sub(1) {
                     sub_lines.push(ShapedLine::default());
                 }
                 line_numbers.push(sub_lines);
@@ -3684,6 +3789,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         );
 
         let token_elements = self.prepaint_tokens(&last_layout, bounds, token_elements, window, cx);
+        let block_elements = self.prepaint_blocks(&last_layout, bounds, window, cx);
 
         // The layout is published here, at the end of prepaint, not in paint.
         // Under GPUI Fast a view drawn again from the last frame around a view
@@ -3752,6 +3858,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
 
         PrepaintState {
             token_elements,
+            block_elements,
             hitbox,
             bounds,
             last_layout,
@@ -4020,6 +4127,10 @@ impl<M: InputModeKind> Element for TextElement<M> {
             }
         }
 
+        // Pets patch: blocks over their rows, under the caret.
+        for element in &mut prepaint.block_elements {
+            element.paint(window, cx);
+        }
         for element in &mut prepaint.token_elements {
             element.paint(window, cx);
         }

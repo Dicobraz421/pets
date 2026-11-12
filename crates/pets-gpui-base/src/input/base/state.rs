@@ -448,6 +448,8 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(super) validated_token_edit: bool,
     pub(super) document_revision: u64,
     pub(super) token_presentation: super::InlineTokenPresentation,
+    /// Pets patch: blocks in the text flow ([`super::EditorBlock`]).
+    pub(crate) blocks: super::blocks::Blocks,
     pub(super) token_layout_cache: Option<Box<super::token_presentation::TokenLayoutCache>>,
     /// Real per-frame bounds of the placed token elements, keyed by token
     /// start offset; used for hover payloads and stale-hover reconciliation.
@@ -992,6 +994,7 @@ impl<M: InputModeKind> InputBaseState<M> {
             validated_token_edit: false,
             document_revision: 0,
             token_presentation: Default::default(),
+            blocks: Default::default(),
             token_bounds: Default::default(),
             hovered_token: None,
             pending_token_hover_exits: Vec::new(),

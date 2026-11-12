@@ -112,7 +112,8 @@ version = "=0.3.12"
 package = "gpui-pre-macros"
 
 [dependencies.html5ever]
-version = "0.27"
+# Pets patch: 0.39 вместо 0.27 — одна копия HTML-стека с Postman (postman-ir).
+version = "0.39"
 
 [dependencies.instant]
 version = "0.1"
@@ -130,7 +131,7 @@ version = "1.0.0"
 features = ["serde"]
 
 [dependencies.markup5ever_rcdom]
-version = "0.3.0"
+version = "0.39.0"
 
 [dependencies.num-traits]
 version = "0.2"

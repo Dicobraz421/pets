@@ -1636,8 +1636,9 @@ mod tests {
     impl Render for StatelessMarkdownRoot {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             self.renders.fetch_add(1, Ordering::Relaxed);
+            // Pets patch: README рабочей области gpui-kit в снимке нет — README крейта.
             div().child(
-                TextView::markdown("stateless-markdown", include_str!("../../../../README.md"))
+                TextView::markdown("stateless-markdown", include_str!("../../README.upstream.md"))
                     .markdown_block_parser(|_, _| None),
             )
         }
