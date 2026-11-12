@@ -6,8 +6,7 @@ pets-ui-ago = { $min ->
     [0] just now
    *[other] { $min } min ago
 }
-pets-ui-theme-system = As in Windows
-pets-ui-theme-system-mac = As in macOS
+pets-ui-theme-system = System
 pets-ui-theme-fluent-light = Fluent light
 pets-ui-theme-fluent-dark = Fluent dark
 pets-ui-theme-high-contrast = High contrast
