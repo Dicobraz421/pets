@@ -1,6 +1,6 @@
 [package]
 name = "pets-shell"
-description = "Жизненный цикл процесса приложения Pets: журнал, паники, фатальные ошибки, единственный экземпляр, реестр, учётные данные — без UI (Windows, macOS)"
+description = "Жизненный цикл процесса приложения Pets: журнал, паники, фатальные ошибки, единственный экземпляр, реестр, учётные данные — без UI (Windows, macOS, Linux)"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -54,6 +54,11 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
     "CFPropertyList",
     "CFString",
 ] }
+
+# Linux (SHELL-LIN-01): Secret Service по D-Bus (`zbus`, без своего рантайма у приложения), поток ошибок в файл (`libc`).
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2.191"
+zbus = { version = "6.2.1", default-features = false, features = ["default-rt"] }
 
 [lints]
 workspace = true
