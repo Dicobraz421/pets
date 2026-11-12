@@ -25,6 +25,11 @@
 - `pets_shell::clipboard::{has_html, read_html}` — `text/html` через `wl-paste` (Wayland) или `xclip` (X11), таймаут
   2 с; UTF-16 с BOM (Firefox) декодируется; разбор — `parse_mac_html`. `write_html` на Linux — ошибка `Invalid`.
 - Зависимости Linux: `oo7` 0.6 и `zbus` 5.19 (`default-features = false`, `async-io`; не 6.x — вторая копия рядом с zbus 5 от gpui раздула бы Postman, решение оркестратора 2026-11-12), `libc` 0.2.191; Cargo.lock — класс B.
+## 2026-11-12. macOS: бейдж на значке в Dock (Postman MAC-07)
+
+Владелец (Postman, волна MAC — класс B, согласована): число непрочитанных на значке в Dock — как подсказка значка в
+трее на Windows. API добавлено, прежнее не менялось: `pets_gpui_macos::dock::set_badge(Option<u32>)` (0 и `None` —
+без бейджа) и `set_badge_label(Option<&str>)` — свой текст («999+»); только из главного потока, иначе ошибка.
 
 ## 2026-11-12. Без названий ОС в текстах интерфейса (Postman MAC-04)
 

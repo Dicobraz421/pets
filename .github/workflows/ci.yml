@@ -1,9 +1,10 @@
-# CI pets (скилл pets-dev): PR и merge queue — один прогон, docs-PR без сборки.
-# Required check — `gate`.
+# CI pets (скилл pets-dev): PR и merge queue — один прогон, docs-PR без сборки, черновик PR — без сборки
+# (прогон — на `gh pr ready`). Required check — `gate`.
 name: CI
 
 on:
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   push:
     branches: [main]
@@ -22,6 +23,8 @@ env:
 
 jobs:
   changes:
+    # Черновик: сборки пропущены, `gate` зелёный (слить черновик нельзя; очередь гоняет всё заново).
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.d.outputs.rust }}
@@ -86,7 +89,8 @@ jobs:
         run: cargo test --manifest-path crates/pets-gpui-windows/Cargo.toml --lib --features test-support -- vsync force_warp lazy_path image_sprite background pets_
 
   # macOS (Postman MAC-06): mac-код pets — clippy рабочей области под aarch64-apple-darwin и тесты крейтов с
-  # кодом macOS. Apple Silicon, macOS 13+ (как у Postman).
+  # кодом macOS. Apple Silicon, macOS 13+ (как у Postman). Тесты с общим буфером обмена — `#[ignore]`
+  # (`clipboard_round_trip`), тесты буфера macOS — на своём `pasteboardWithUniqueName`.
   macos:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
