@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use zbus::export::futures_core::Stream as _;
 use zbus::export::serde;
-use zbus::wire::{ObjectPath, OwnedObjectPath, OwnedVariant, Variant};
+use zbus::zvariant::{ObjectPath, OwnedObjectPath, OwnedValue as OwnedVariant, Value as Variant};
 use zbus::{Connection, MessageStream};
 
 use crate::ShellError;
@@ -77,8 +77,8 @@ impl Client {
 
     async fn call<B, R>(&self, path: &str, iface: &str, method: &'static str, body: &B) -> Result<R, ShellError>
     where
-        B: serde::Serialize + zbus::DynamicType,
-        R: for<'d> serde::Deserialize<'d> + zbus::Type,
+        B: serde::Serialize + zbus::zvariant::DynamicType,
+        R: for<'d> serde::Deserialize<'d> + zbus::zvariant::Type,
     {
         let reply = self
             .conn

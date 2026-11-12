@@ -3,7 +3,7 @@
 lane: shell
 status: done
 deps: []
-class: B                    # Cargo.lock (zbus 6), docs/decisions.md
+class: B                    # Cargo.lock (zbus 5.19 — копия gpui), docs/decisions.md
 files: [crates/pets-shell/Cargo.toml, crates/pets-shell/src/lib.rs, crates/pets-shell/src/clipboard.rs, crates/pets-shell/src/sys/, Cargo.lock, docs/decisions.md]
 read: [Postman docs/decisions/2026-11-12-linux.md, crates/pets-shell/src/sys/macos.rs]
 checks: [clippy linux/macos/windows -p pets-shell, nextest -p pets-shell]

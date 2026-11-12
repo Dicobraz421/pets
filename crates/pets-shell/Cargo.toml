@@ -58,7 +58,7 @@ objc2-core-foundation = { version = "0.3.2", default-features = false, features 
 # Linux (SHELL-LIN-01): Secret Service по D-Bus (`zbus`, без своего рантайма у приложения), поток ошибок в файл (`libc`).
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2.191"
-zbus = { version = "6.2.1", default-features = false, features = ["default-rt"] }
+zbus = { version = "5.19", default-features = false, features = ["async-io"] }
 
 [lints]
 workspace = true
