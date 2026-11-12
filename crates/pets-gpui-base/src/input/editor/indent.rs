@@ -40,7 +40,11 @@ impl TabSize {
         let mut count = 0;
         for ch in line.chars() {
             match ch {
-                '\t' => count += self.tab_size,
+                '\t' => {
+                    if self.tab_size > 0 {
+                        count += self.tab_size - count % self.tab_size;
+                    }
+                }
                 ' ' => count += 1,
                 _ => break,
             }
@@ -153,7 +157,7 @@ impl<M: InputModeKind> TextElement<M> {
                 current_indents = last_indents.clone();
             }
 
-            offset_y += line_layout.size(line_height).height;
+            offset_y += line_layout.wrapped_lines.len() * line_height;
             last_indents = current_indents;
         }
 
@@ -482,8 +486,10 @@ mod tests {
         assert_eq!(tab.indent_count(&RopeSlice::from("  abc")), 2);
         assert_eq!(tab.indent_count(&RopeSlice::from("    abc")), 4);
         assert_eq!(tab.indent_count(&RopeSlice::from("\tabc")), 4);
-        assert_eq!(tab.indent_count(&RopeSlice::from("  \tabc")), 6);
-        assert_eq!(tab.indent_count(&RopeSlice::from(" \t abc  ")), 6);
+        assert_eq!(tab.indent_count(&RopeSlice::from("  \tabc")), 4);
+        assert_eq!(tab.indent_count(&RopeSlice::from(" \t abc  ")), 5);
+        assert_eq!(tab.indent_count(&RopeSlice::from(" \t \tabc")), 8);
+        assert_eq!(tab.indent_count(&RopeSlice::from("    \tabc")), 8);
         assert_eq!(tab.indent_count(&RopeSlice::from("abc")), 0);
     }
 }

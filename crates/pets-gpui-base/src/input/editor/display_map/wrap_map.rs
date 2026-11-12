@@ -108,6 +108,11 @@ impl WrapMap {
         cx: &mut App,
     ) {
         self.wrapper.adjust_inline_metrics(range, new_text.len());
+        // Before the first layout the font is still the window default; layout shapes it all.
+        if !self.wrapper.is_prepared() {
+            self.wrapper.set_default_text(changed_text);
+            return;
+        }
         self.wrapper.update(changed_text, range, new_text, cx);
     }
 
@@ -120,19 +125,6 @@ impl WrapMap {
         self.wrapper.set_inline_metrics(metrics, cx);
     }
 
-    /// Pets patch (blocks): rows reserved after buffer lines.
-    pub(super) fn set_block_rows(&mut self, rows: std::rc::Rc<[(usize, usize)]>) {
-        self.wrapper.set_block_rows(rows);
-    }
-
-    /// Pets patch (blocks): the wrap row is one reserved for a block (no text, no caret).
-    pub(super) fn is_block_row(&self, wrap_row: usize) -> bool {
-        let line = self.wrap_row_to_buffer_line(wrap_row);
-        let first = self.buffer_line_to_first_wrap_row(line);
-        self.line(line)
-            .is_some_and(|item| item.block_rows > 0 && wrap_row >= first + item.wrapped_lines.len())
-    }
-
     pub(super) fn on_layout_changed(&mut self, wrap_width: Option<Pixels>, cx: &mut App) {
         self.wrapper.set_wrap_width(wrap_width, cx);
     }
@@ -140,6 +132,11 @@ impl WrapMap {
     /// Set the wrapping indent mode for continuation lines.
     pub(super) fn set_wrapping_indent(&mut self, wrapping_indent: WrappingIndent, cx: &mut App) {
         self.wrapper.set_wrapping_indent(wrapping_indent, cx);
+    }
+
+    /// Set the number of spaces per tab stop. Returns whether it changed.
+    pub(super) fn set_tab_size(&mut self, tab_size: usize, cx: &mut App) -> bool {
+        self.wrapper.set_tab_size(tab_size, cx)
     }
 
     /// Set font parameters

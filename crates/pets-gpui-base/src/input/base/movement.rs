@@ -126,29 +126,9 @@ impl<M: InputModeKind> InputBaseState<M> {
                     .nearest_visible_display_row(display_point.row)
             });
         let max_display_row = self.display_map.display_row_count().saturating_sub(1);
-        let mut target_display_row = current_display_row
+        let target_display_row = current_display_row
             .saturating_add_signed(move_lines)
             .min(max_display_row);
-        // Pets patch (blocks): rows reserved for a block hold no caret — step over them in the
-        // direction of travel; with no text row beyond, stay on the text row before them.
-        while self.display_map.is_block_display_row(target_display_row) {
-            let next = if move_lines < 0 {
-                target_display_row.checked_sub(1)
-            } else {
-                (target_display_row < max_display_row).then_some(target_display_row + 1)
-            };
-            match next {
-                Some(row) => target_display_row = row,
-                None => {
-                    while target_display_row > 0
-                        && self.display_map.is_block_display_row(target_display_row)
-                    {
-                        target_display_row -= 1;
-                    }
-                    break;
-                }
-            }
-        }
         let target_wrap_row = self
             .display_map
             .display_row_to_wrap_row(target_display_row)

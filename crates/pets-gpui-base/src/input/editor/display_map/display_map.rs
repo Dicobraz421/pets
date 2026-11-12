@@ -235,19 +235,6 @@ impl DisplayMap {
         self.rebuild_fold_projection();
     }
 
-    /// Pets patch (blocks): reserve rows after buffer lines (`(line, rows)`, sorted by line).
-    pub(crate) fn set_block_rows(&mut self, rows: std::rc::Rc<[(usize, usize)]>) {
-        self.wrap_map.set_block_rows(rows);
-        self.rebuild_fold_projection();
-    }
-
-    /// Pets patch (blocks): the display row is one reserved for a block.
-    pub(crate) fn is_block_display_row(&self, display_row: usize) -> bool {
-        self.fold_map
-            .display_row_to_wrap_row(display_row)
-            .is_some_and(|wrap_row| self.wrap_map.is_block_row(wrap_row))
-    }
-
     pub fn on_layout_changed(&mut self, wrap_width: Option<Pixels>, cx: &mut App) {
         self.wrap_map.on_layout_changed(wrap_width, cx);
         self.rebuild_fold_projection();
@@ -257,6 +244,13 @@ impl DisplayMap {
     pub fn set_wrapping_indent(&mut self, wrapping_indent: WrappingIndent, cx: &mut App) {
         self.wrap_map.set_wrapping_indent(wrapping_indent, cx);
         self.rebuild_fold_projection();
+    }
+
+    /// Set the number of spaces per tab stop.
+    pub(crate) fn set_tab_size(&mut self, tab_size: usize, cx: &mut App) {
+        if self.wrap_map.set_tab_size(tab_size, cx) {
+            self.rebuild_fold_projection();
+        }
     }
 
     /// Set font parameters
@@ -313,6 +307,13 @@ impl DisplayMap {
         self.wrap_map
             .wrapper()
             .offset_to_display_point_with_affinity(offset, line_end_affinity)
+    }
+
+    /// Resolve the caret's visual row through both wrapping and folded regions.
+    pub(crate) fn offset_to_display_row(&self, offset: usize, line_end_affinity: bool) -> usize {
+        let point = self.offset_to_wrap_display_point_with_affinity(offset, line_end_affinity);
+        self.wrap_row_to_display_row(point.row)
+            .unwrap_or_else(|| self.nearest_visible_display_row(point.row))
     }
 
     /// Convert wrap display point to byte offset.
