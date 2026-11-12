@@ -59,6 +59,8 @@ struct CosmicTextSystemState {
     font_ids_by_family_cache: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     system_font_fallback: String,
     missing_glyph_sink: Option<Arc<dyn MissingGlyphSink>>,
+    /// Pets patch: цветной шрифт эмодзи (`None` — ещё не искали; `Some(None)` — в системе нет).
+    pets_emoji_font: Option<Option<(FontId, SharedString)>>,
 }
 
 struct LoadedFont {
@@ -141,6 +143,7 @@ impl CosmicTextSystem {
             font_ids_by_family_cache: HashMap::default(),
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
+            pets_emoji_font: None,
         }))
     }
 
@@ -160,6 +163,7 @@ impl CosmicTextSystem {
             font_ids_by_family_cache: HashMap::default(),
             system_font_fallback: system_font_fallback.to_string(),
             missing_glyph_sink: None,
+            pets_emoji_font: None,
         }))
     }
 }
@@ -328,6 +332,8 @@ impl CosmicTextSystemState {
     #[profiling::function]
     fn add_fonts(&mut self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.font_ids_by_family_cache.clear();
+        // Pets patch: среди новых шрифтов может быть цветной шрифт эмодзи.
+        self.pets_emoji_font = None;
         let db = self.font_system.db_mut();
         for bytes in fonts {
             db.load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(bytes)));
@@ -690,12 +696,52 @@ impl CosmicTextSystemState {
         layout.descent = layout.descent.max(segment.descent);
     }
 
+    /// Pets patch: цветной шрифт эмодзи из [`pets_emoji::EMOJI_FAMILIES`], загруженный как `LoadedFont`.
+    fn pets_emoji_font(&mut self) -> Option<(FontId, SharedString)> {
+        if let Some(cached) = &self.pets_emoji_font {
+            return cached.clone();
+        }
+        let found = crate::pets_emoji::EMOJI_FAMILIES.iter().find_map(|family| {
+            self.font_system
+                .db()
+                .faces()
+                .find(|face| face.families.iter().any(|(name, _)| name == family))
+                .map(|face| (face.id, SharedString::from(*family)))
+        });
+        let resolved = found.and_then(|(db_id, family)| {
+            if let Some(ix) = self
+                .loaded_fonts
+                .iter()
+                .position(|loaded| loaded.font.id() == db_id)
+            {
+                self.loaded_fonts[ix].is_known_emoji_font = true;
+                return Some((FontId(ix), family));
+            }
+            let font = self.font_system.get_font(db_id, Weight::NORMAL)?;
+            let font_id = FontId(self.loaded_fonts.len());
+            self.loaded_fonts.push(LoadedFont {
+                font,
+                features: CosmicFontFeatures::new(),
+                is_known_emoji_font: true,
+                user_fallback_chain: Arc::from(Vec::new()),
+            });
+            Some((font_id, family))
+        });
+        if resolved.is_none() {
+            log::debug!("no color emoji font found");
+        }
+        self.pets_emoji_font = Some(resolved.clone());
+        resolved
+    }
+
     fn layout_line_no_separators(
         &mut self,
         text: &str,
         font_size: Pixels,
         font_runs: &[FontRun],
     ) -> LineLayout {
+        // Pets patch: эмодзи — цветным шрифтом (см. `pets_emoji`).
+        let emoji_font = self.pets_emoji_font();
         let mut attrs_list = AttrsList::new(&Attrs::new());
         let mut offs = 0;
         for run in font_runs {
@@ -741,6 +787,34 @@ impl CosmicTextSystemState {
                     Some(ix) => &fallback_attrs[ix],
                 };
                 attrs_list.add_span(span.start..span.end, attrs);
+            }
+            // Pets patch: графемы с эмодзи-представлением — отрезками цветного шрифта поверх отрезков выше.
+            if let Some((emoji_id, emoji_family)) = &emoji_font {
+                let emoji_attrs = Attrs::new()
+                    .metadata(emoji_id.0)
+                    .family(Family::Name(emoji_family));
+                let mut pending: Option<Range<usize>> = None;
+                for (ix, grapheme) in text[offs..run_end].grapheme_indices(true) {
+                    let start = offs + ix;
+                    let end = start + grapheme.len();
+                    let is_emoji = crate::pets_emoji::is_emoji_grapheme(grapheme)
+                        && grapheme
+                            .chars()
+                            .next()
+                            .is_some_and(|ch| charmap_covers(&self.loaded_fonts, *emoji_id, ch));
+                    match (&mut pending, is_emoji) {
+                        (Some(range), true) if range.end == start => range.end = end,
+                        (_, true) => {
+                            if let Some(range) = pending.replace(start..end) {
+                                attrs_list.add_span(range, &emoji_attrs);
+                            }
+                        }
+                        (_, false) => {}
+                    }
+                }
+                if let Some(range) = pending {
+                    attrs_list.add_span(range, &emoji_attrs);
+                }
             }
             offs = run_end;
         }

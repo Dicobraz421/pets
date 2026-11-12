@@ -1829,6 +1829,16 @@ impl PlatformWindow for X11Window {
         .log_err();
     }
 
+    // Pets patch: перетаскивание файлов из окна — источник XDND (`pets_xdnd`).
+    fn can_start_external_drag(&self) -> bool {
+        true
+    }
+
+    fn start_external_drag(&self, payload: &gpui::ExternalDragPayload) -> bool {
+        let client = self.0.state.borrow().client.get_client();
+        client.is_some_and(|client| client.pets_start_drag(self.0.x_window, payload))
+    }
+
     fn start_window_move(&self) {
         const MOVERESIZE_MOVE: u32 = 8;
         self.send_moveresize(MOVERESIZE_MOVE).log_err();

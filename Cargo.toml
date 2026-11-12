@@ -2,7 +2,12 @@
 resolver = "3"
 members = ["crates/*"]
 # Чужой код (снимок Zed) со своим Cargo.lock и стилем: подключается приложениями через [patch], проверяется отдельно.
-exclude = ["crates/pets-gpui-windows", "crates/pets-gpui-base"]
+exclude = [
+    "crates/pets-gpui-windows",
+    "crates/pets-gpui-base",
+    "crates/pets-gpui-linux",
+    "crates/pets-gpui-wgpu",
+]
 
 [workspace.package]
 edition = "2024"
@@ -31,9 +36,11 @@ unwrap_used = "deny"
 expect_used = "deny"
 panic = "deny"
 
-# Свой патч Windows-платформы gpui — и здесь (pets-ui), как у приложений.
+# Свои патчи платформ gpui — и здесь (pets-ui), как у приложений.
 [patch.crates-io]
 gpui-pre-windows = { path = "crates/pets-gpui-windows" }
+gpui-pre-linux = { path = "crates/pets-gpui-linux" }
+gpui-pre-wgpu = { path = "crates/pets-gpui-wgpu" }
 
 # Гигиена диска (H-01): номера строк в стектрейсах, PDB в разы меньше; без символов у зависимостей.
 [profile.dev]

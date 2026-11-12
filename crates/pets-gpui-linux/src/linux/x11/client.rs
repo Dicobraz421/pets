@@ -239,6 +239,8 @@ pub struct X11ClientState {
     pub(crate) clipboard: Clipboard,
     pub(crate) clipboard_item: Option<ClipboardItem>,
     pub(crate) xdnd_state: Xdnd,
+    /// Pets patch: наше окно тащит файлы наружу (источник XDND).
+    pub(crate) pets_xdnd: Option<super::pets_xdnd::PetsXdnd>,
 }
 
 #[derive(Clone)]
@@ -554,6 +556,7 @@ impl X11Connection {
                 clipboard,
                 clipboard_item: None,
                 xdnd_state: Xdnd::default(),
+                pets_xdnd: None,
             })
         })));
         // From here on, `Drop` removes whatever was registered if a later step fails.
@@ -879,8 +882,45 @@ impl X11Client {
             .map(|window_reference| window_reference.window.clone())
     }
 
+    /// Pets patch: начать перетаскивание файлов из окна `source` (источник XDND).
+    pub(crate) fn pets_start_drag(
+        &self,
+        source: xproto::Window,
+        payload: &gpui::ExternalDragPayload,
+    ) -> bool {
+        let mut state = self.0.borrow_mut();
+        let state = &mut *state;
+        if let Some(mut old) = state.pets_xdnd.take() {
+            old.cancel(&state.xcb_connection, &state.atoms);
+        }
+        let uri_list = super::pets_xdnd::uri_list(payload);
+        state.pets_xdnd =
+            super::pets_xdnd::PetsXdnd::start(&state.xcb_connection, &state.atoms, source, uri_list);
+        state.pets_xdnd.is_some()
+    }
+
+    /// Pets patch: сеанс XDND окончен — окно-источник узнаёт об этом (gpui снимает перетаскивание).
+    fn pets_end_drag(&self) {
+        let Some(drag) = self.0.borrow_mut().pets_xdnd.take() else {
+            return;
+        };
+        log::debug!("XDND: drag ended (dropped: {})", drag.dropped);
+        if let Some(window) = self.get_window(drag.source) {
+            window.handle_input(PlatformInput::FileDrop(FileDropEvent::Ended));
+        }
+    }
+
     fn handle_event(&self, event: Event) -> Option<()> {
         match event {
+            // Pets patch: получатель броска читает `XdndSelection`.
+            Event::SelectionRequest(event) => {
+                let state = self.0.borrow();
+                if event.selection == state.atoms.XdndSelection
+                    && let Some(drag) = state.pets_xdnd.as_ref()
+                {
+                    drag.selection_request(&state.xcb_connection, &state.atoms, &event);
+                }
+            }
             Event::UnmapNotify(event) => {
                 let mut state = self.0.borrow_mut();
                 if let Some(window_ref) = state.windows.get_mut(&event.window) {
@@ -906,6 +946,33 @@ impl X11Client {
                 let window = self.get_window(event.window)?;
                 let [atom, arg1, arg2, arg3, arg4] = event.data.as_data32();
                 let delete_window_atom = self.0.borrow().atoms.WM_DELETE_WINDOW;
+
+                // Pets patch: ответы цели нашему перетаскиванию (`Some(true)` — сеанс окончен).
+                let pets_reply = {
+                    let mut state = self.0.borrow_mut();
+                    let state = &mut *state;
+                    let data = event.data.as_data32();
+                    match state
+                        .pets_xdnd
+                        .as_mut()
+                        .filter(|drag| drag.source == event.window)
+                    {
+                        Some(drag) if event.type_ == state.atoms.XdndStatus => {
+                            drag.status(&state.xcb_connection, &state.atoms, data);
+                            Some(false)
+                        }
+                        Some(drag) if event.type_ == state.atoms.XdndFinished => {
+                            Some(drag.is_finished_by(data))
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some(ended) = pets_reply {
+                    if ended {
+                        self.pets_end_drag();
+                    }
+                    return Some(());
+                }
 
                 if atom == delete_window_atom {
                     if window.should_close() {
@@ -1144,6 +1211,24 @@ impl X11Client {
             }
             Event::KeyPress(event) => {
                 let window = self.get_window(event.event)?;
+                // Pets patch: Esc отменяет наше перетаскивание.
+                let cancelled = {
+                    let mut state = self.0.borrow_mut();
+                    let state = &mut *state;
+                    let escape = state.xkb.key_get_one_sym(event.detail.into())
+                        == xkbc::Keysym::Escape;
+                    match state.pets_xdnd.as_mut() {
+                        Some(drag) if escape && !drag.dropped => {
+                            drag.cancel(&state.xcb_connection, &state.atoms);
+                            true
+                        }
+                        _ => false,
+                    }
+                };
+                if cancelled {
+                    self.pets_end_drag();
+                    return Some(());
+                }
                 let mut state = self.0.borrow_mut();
 
                 let modifiers = modifiers_from_state(event.state);
@@ -1309,6 +1394,18 @@ impl X11Client {
             }
             Event::XinputButtonRelease(event) => {
                 let window = self.get_window(event.event)?;
+                // Pets patch: бросок или отмена нашего перетаскивания.
+                let ended = {
+                    let mut state = self.0.borrow_mut();
+                    let state = &mut *state;
+                    state
+                        .pets_xdnd
+                        .as_mut()
+                        .is_some_and(|drag| !drag.release(&state.xcb_connection, &state.atoms, event.time))
+                };
+                if ended {
+                    self.pets_end_drag();
+                }
                 let mut state = self.0.borrow_mut();
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
@@ -1370,6 +1467,22 @@ impl X11Client {
                 );
                 let modifiers = modifiers_from_xinput_info(event.mods);
                 state.modifiers = modifiers;
+                // Pets patch: указатель нашего перетаскивания — цели под ним.
+                {
+                    let state = &mut *state;
+                    if let Some(drag) = state.pets_xdnd.as_mut() {
+                        let root = state.xcb_connection.setup().roots[state.x_root_index].root;
+                        let windows = &state.windows;
+                        drag.motion(
+                            &state.xcb_connection,
+                            &state.atoms,
+                            root,
+                            ((event.root_x >> 16) as i16, (event.root_y >> 16) as i16),
+                            event.time,
+                            |window| windows.contains_key(&window),
+                        );
+                    }
+                }
                 drop(state);
 
                 if event.valuator_mask[0] & 3 != 0 {

@@ -1,4 +1,6 @@
 mod cosmic_text_system;
+// Pets patch: эмодзи — цветным шрифтом.
+mod pets_emoji;
 mod wgpu_atlas;
 mod wgpu_context;
 mod wgpu_renderer;

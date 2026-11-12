@@ -51,6 +51,11 @@ name = "gpui_wgpu"
 path = "src/gpui_wgpu.rs"
 doctest = false
 
+# Pets patch: тесты наших правок (юнит-тесты upstream вне Zed не собираются).
+[[test]]
+name = "pets_emoji"
+path = "tests/pets_emoji.rs"
+
 [[bench]]
 name = "layout_line"
 path = "benches/layout_line.rs"
