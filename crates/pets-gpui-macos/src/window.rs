@@ -1,12 +1,27 @@
-//! Номер окна и снимок окна — CoreGraphics. Свои окна процесс снимает без разрешения «Запись экрана».
-//! `CGWindowListCreateImage` с macOS 14 устарела (замена — ScreenCaptureKit), но работает; переход — Postman MAC-04.
+//! Номер окна и снимок окна. Свои окна процесс снимает без разрешения «Запись экрана».
+//!
+//! Снимок (Postman MAC-04): macOS 14.4 и новее — ScreenCaptureKit (`SCShareableContent` своего процесса,
+//! `SCScreenshotManager`); macOS 13 — 14.3 и при отказе ScreenCaptureKit — `CGWindowListCreateImage` (устарела с
+//! macOS 14, но работает). Номер окна — `-[NSWindow windowNumber]` и `CGWindowListCopyWindowInfo`.
 
 use std::ffi::c_void;
 use std::io;
+use std::sync::mpsc;
+use std::time::Duration;
 
-use objc2::MainThreadMarker;
+use block2::RcBlock;
+use objc2::rc::Retained;
+use objc2::{AnyThread as _, MainThreadMarker};
 use objc2_app_kit::NSView;
+use objc2_core_graphics::CGImage;
+use objc2_foundation::NSError;
+use objc2_screen_capture_kit::{
+    SCContentFilter, SCScreenshotManager, SCShareableContent, SCStreamConfiguration, SCWindow,
+};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+
+/// Сколько ждать ответа ScreenCaptureKit (обычно — десятки миллисекунд).
+const SCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 type CFTypeRef = *const c_void;
 
@@ -156,16 +171,97 @@ pub fn frontmost_own() -> io::Result<isize> {
     Err(io::Error::other("no on-screen window of this process"))
 }
 
-/// Снимок окна `window` ([`id`]) без рамки и тени: RGBA, строки сверху вниз. Можно звать не из главного потока.
+/// Снимок окна `window` ([`id`]) без тени: RGBA, строки сверху вниз. Не из главного потока: ScreenCaptureKit
+/// отвечает в своей очереди, вызов ждёт ответа.
 pub fn capture(window: isize) -> io::Result<Image> {
     let id = u32::try_from(window).map_err(|_| io::Error::other(format!("window id {window}")))?;
+    if objc2::available!(macos = 14.4) {
+        match capture_sck(id) {
+            Ok(image) => return Ok(image),
+            Err(e) => tracing::warn!(target: "pets_gpui_macos", "ScreenCaptureKit: {e}; CoreGraphics capture"),
+        }
+    }
+    capture_cg(id)
+}
+
+/// Ошибка из `NSError` обработчика (или «нет результата»).
+fn ns_error(error: *mut NSError, what: &str) -> io::Error {
+    // SAFETY: ненулевой `error` — живой NSError на время обработчика.
+    match unsafe { error.as_ref() } {
+        Some(e) => io::Error::other(format!("{what}: {}", e.localizedDescription())),
+        None => io::Error::other(format!("{what}: no result")),
+    }
+}
+
+/// ScreenCaptureKit (macOS 14.4+): окно `id` среди окон своего процесса — без разрешения «Запись экрана»; снимок —
+/// в пикселях экрана, без тени и курсора.
+fn capture_sck(id: u32) -> io::Result<Image> {
+    let (tx, rx) = mpsc::channel::<io::Result<Image>>();
+    let on_content = RcBlock::new(move |content: *mut SCShareableContent, error: *mut NSError| {
+        // SAFETY: ненулевой `content` — живой объект на время обработчика.
+        let started = match unsafe { content.as_ref() } {
+            Some(content) => screenshot(content, id, tx.clone()),
+            None => Err(ns_error(error, "shareable content")),
+        };
+        if let Err(e) = started {
+            let _ = tx.send(Err(e));
+        }
+    });
+    // SAFETY: обработчик — блок с подписью, которую ждёт метод; держит только `Sender`.
+    unsafe { SCShareableContent::getCurrentProcessShareableContentWithCompletionHandler(&on_content) };
+    rx.recv_timeout(SCK_TIMEOUT)
+        .map_err(|_| io::Error::other(format!("no answer in {} s", SCK_TIMEOUT.as_secs())))?
+}
+
+/// Запросить снимок окна `id` из `content`; итог — в `tx`.
+fn screenshot(content: &SCShareableContent, id: u32, tx: mpsc::Sender<io::Result<Image>>) -> io::Result<()> {
+    // SAFETY: свойства живых объектов ScreenCaptureKit.
+    let window: Retained<SCWindow> = unsafe { content.windows() }
+        .iter()
+        .find(|w| unsafe { w.windowID() } == id)
+        .ok_or_else(|| io::Error::other(format!("window {id} is not in the shareable content")))?;
+    // SAFETY: назначенный инициализатор фильтра одного окна; окно живо.
+    let filter = unsafe { SCContentFilter::initWithDesktopIndependentWindow(SCContentFilter::alloc(), &window) };
+    // SAFETY: свойства фильтра (macOS 14+) и настройки снимка — простые значения.
+    let config = unsafe {
+        let rect = filter.contentRect();
+        let scale = f64::from(filter.pointPixelScale());
+        let config = SCStreamConfiguration::new();
+        config.setWidth((rect.size.width * scale).round() as usize);
+        config.setHeight((rect.size.height * scale).round() as usize);
+        config.setShowsCursor(false);
+        config.setIgnoreShadowsSingleWindow(true);
+        config
+    };
+    let on_image = RcBlock::new(move |image: *mut CGImage, error: *mut NSError| {
+        let result = if image.is_null() {
+            Err(ns_error(error, "screenshot"))
+        } else {
+            draw(image.cast_const().cast())
+        };
+        let _ = tx.send(result);
+    });
+    // SAFETY: фильтр и настройки живы до конца вызова (метод их удерживает); блок с ожидаемой подписью.
+    unsafe {
+        SCScreenshotManager::captureImageWithFilter_configuration_completionHandler(&filter, &config, Some(&on_image));
+    }
+    Ok(())
+}
+
+/// CoreGraphics (`CGWindowListCreateImage`): macOS 13 — 14.3 и запасной путь.
+fn capture_cg(id: u32) -> io::Result<Image> {
     // SAFETY: `CGRectNull` — константа CoreGraphics; снимок освобождает `Owned`.
     let image = Owned(unsafe { CGWindowListCreateImage(CGRectNull, INCLUDING_WINDOW, id, BOUNDS_IGNORE_FRAMING) });
     if image.0.is_null() {
         return Err(io::Error::other(format!("CGWindowListCreateImage({id}) failed")));
     }
-    // SAFETY: `image.0` — живой CGImage.
-    let (width, height) = unsafe { (CGImageGetWidth(image.0), CGImageGetHeight(image.0)) };
+    draw(image.0)
+}
+
+/// Пиксели `CGImage` в RGBA (8 бит на канал, строки сверху вниз). `image` — живой CGImage на время вызова.
+fn draw(image: CFTypeRef) -> io::Result<Image> {
+    // SAFETY: `image` — живой CGImage (обещание вызывающего).
+    let (width, height) = unsafe { (CGImageGetWidth(image), CGImageGetHeight(image)) };
     let (Ok(w), Ok(h)) = (u32::try_from(width), u32::try_from(height)) else {
         return Err(io::Error::other(format!("capture {width}x{height}")));
     };
@@ -198,7 +294,7 @@ pub fn capture(window: isize) -> io::Result<Image> {
                 height: height as f64,
             },
         };
-        CGContextDrawImage(ctx.0, rect, image.0);
+        CGContextDrawImage(ctx.0, rect, image);
     }
     // Окно непрозрачно: предумноженная альфа совпадает с обычной.
     Ok(Image {

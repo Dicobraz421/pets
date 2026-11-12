@@ -5,9 +5,14 @@ mod windows;
 #[cfg(windows)]
 pub(crate) use windows::*;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::*;
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod other;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) use other::*;
 
 /// Что изменилось (поток слежения).
