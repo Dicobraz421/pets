@@ -20,7 +20,7 @@ const FAMILIES: &[&str] = &[
 const SIZES: &[f32] = &[10.0, 11.0, 12.0, 12.5, 13.0, 14.0, 15.0, 16.0, 18.0, 24.0];
 
 fn system() -> DirectWriteTextSystem {
-    DirectWriteTextSystem::new(None).unwrap()
+    DirectWriteTextSystem::new().unwrap()
 }
 
 fn id(sys: &DirectWriteTextSystem, f: &Font) -> FontId {

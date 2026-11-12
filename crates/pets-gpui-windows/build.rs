@@ -5,7 +5,6 @@
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=src/shaders.hlsl");
-    println!("cargo:rerun-if-changed=src/color_text_raster.hlsl");
     println!("cargo:rerun-if-changed=src/alpha_correction.hlsl");
     println!("cargo::rustc-check-cfg=cfg(shaders_runtime)");
     #[cfg(windows)]
@@ -23,7 +22,7 @@ mod shaders {
     use windows::Win32::Graphics::Direct3D::ID3DBlob;
     use windows::core::PCSTR;
 
-    const MODULES: [&str; 9] = [
+    const MODULES: [&str; 8] = [
         "quad",
         "shadow",
         "underline",
@@ -32,20 +31,16 @@ mod shaders {
         "monochrome_sprite",
         "subpixel_sprite",
         "polychrome_sprite",
-        "emoji_rasterization",
     ];
 
     pub fn compile() {
         let out = PathBuf::from(std::env::var("OUT_DIR").expect("OUT_DIR"));
         let alpha = include_str!("src/alpha_correction.hlsl");
         let main = include_str!("src/shaders.hlsl").replace("#include \"alpha_correction.hlsl\"", alpha);
-        let emoji =
-            include_str!("src/color_text_raster.hlsl").replace("#include \"alpha_correction.hlsl\"", alpha);
         let mut rs = String::new();
         for module in MODULES {
-            let source = if module == "emoji_rasterization" { &emoji } else { &main };
             for (stage, target) in [("vertex", "vs_4_1"), ("fragment", "ps_4_1")] {
-                let bytes = compile_one(source, &format!("{module}_{stage}"), target);
+                let bytes = compile_one(&main, &format!("{module}_{stage}"), target);
                 let file = format!("{module}_{stage}.cso");
                 std::fs::write(out.join(&file), &bytes).expect("write shader");
                 let _ = writeln!(
