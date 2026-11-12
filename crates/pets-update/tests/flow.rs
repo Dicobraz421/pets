@@ -9,11 +9,19 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use pets_update::{
-    Cancel, Channel, CheckOutcome, CheckReason, DisabledBy, InstallKind, Policy, Product, Progress, Response, Settings,
-    SignatureError, Transport, Update, UpdateError, Updater, Version, releases_url, select,
+    ARCH, Cancel, Channel, CheckOutcome, CheckReason, DisabledBy, InstallKind, OS, Policy, Product, Progress, Response,
+    Settings, SignatureError, Transport, Update, UpdateError, Updater, Version, releases_url, select,
 };
 
-const FIXTURE: &str = include_str!("fixtures/releases.json");
+/// Ответ GitHub; имена артефактов в нём — для этой ОС и архитектуры (в файле — `windows-x64`).
+fn fixture() -> String {
+    include_str!("fixtures/releases.json").replace("-windows-x64.", &format!("-{OS}-{ARCH}."))
+}
+
+/// Имя артефакта этой ОС и архитектуры: `asset("app-0.2.0", "msi")` → `app-0.2.0-windows-x64.msi`.
+fn asset(stem: &str, ext: &str) -> String {
+    format!("{stem}-{OS}-{ARCH}.{ext}")
+}
 const REPO: &str = "Aahz/app";
 /// Содержимое «установщика»: 16 байт, как `size` в фикстуре.
 const INSTALLER: &[u8] = b"0123456789abcdef";
@@ -30,7 +38,7 @@ struct Net {
 impl Net {
     fn with_releases() -> Net {
         let net = Net::default();
-        net.route(&releases_url(REPO), FIXTURE.as_bytes());
+        net.route(&releases_url(REPO), fixture().as_bytes());
         net
     }
 
@@ -93,7 +101,7 @@ fn updater(current: &str, dir: &Path, policy: Policy, net: &Net) -> Updater {
 }
 
 fn pick(current: &str, channel: Channel, kind: InstallKind) -> Option<Update> {
-    select(FIXTURE, &product(current, &[]), channel, kind).unwrap()
+    select(&fixture(), &product(current, &[]), channel, kind).unwrap()
 }
 
 fn version(update: Option<Update>) -> Option<String> {
@@ -116,17 +124,20 @@ fn github_fixture_is_parsed() {
     let update = pick("0.1.0", Channel::Stable, InstallKind::Msi).unwrap();
     assert_eq!(update.version, Version::new(0, 2, 0));
     assert_eq!(update.kind, InstallKind::Msi);
-    assert_eq!(update.asset_name, "app-0.2.0-windows-x64.msi");
+    assert_eq!(update.asset_name, asset("app-0.2.0", "msi"));
     assert_eq!(update.size, 16);
     assert_eq!(
         update.asset_url,
-        "https://github.com/Aahz/app/releases/download/v0.2.0/app-0.2.0-windows-x64.msi"
+        format!(
+            "https://github.com/Aahz/app/releases/download/v0.2.0/{}",
+            asset("app-0.2.0", "msi")
+        )
     );
     assert_eq!(update.signature_url, format!("{}.minisig", update.asset_url));
     assert_eq!(update.page_url, "https://github.com/Aahz/app/releases/tag/v0.2.0");
 
     let portable = pick("0.1.0", Channel::Stable, InstallKind::Portable).unwrap();
-    assert_eq!(portable.asset_name, "app-0.2.0-windows-x64.zip");
+    assert_eq!(portable.asset_name, asset("app-0.2.0", "zip"));
 
     assert!(matches!(
         select(
@@ -270,7 +281,7 @@ fn failed_check_is_retried_in_an_hour() {
     assert!(matches!(scheduled(at(0)), Err(UpdateError::Http(404))));
     assert_eq!(scheduled(at(30)).unwrap(), CheckOutcome::NotDue);
     assert_eq!(net.calls(), 1);
-    net.route(&releases_url(REPO), FIXTURE.as_bytes());
+    net.route(&releases_url(REPO), fixture().as_bytes());
     assert!(matches!(scheduled(at(61)).unwrap(), CheckOutcome::Available(_)));
     assert_eq!(net.calls(), 2);
 }
@@ -325,7 +336,7 @@ fn staged(dir: &Path, keys: &'static [&'static str], installer: &[u8], signature
 fn download_reports_progress_and_verifies() {
     let tmp = tempfile::tempdir().unwrap();
     let signer = Signer::new();
-    let signature = signer.sign(INSTALLER, "app-0.2.0-windows-x64.msi");
+    let signature = signer.sign(INSTALLER, &asset("app-0.2.0", "msi"));
     let (updater, update, _net) = staged(tmp.path(), signer.keys(), INSTALLER, &signature);
 
     let mut seen = Vec::new();
@@ -339,7 +350,7 @@ fn download_reports_progress_and_verifies() {
             total: 16
         })
     );
-    assert_eq!(downloaded.file, tmp.path().join("app-0.2.0-windows-x64.msi"));
+    assert_eq!(downloaded.file, tmp.path().join(asset("app-0.2.0", "msi")));
     assert_eq!(std::fs::read(&downloaded.file).unwrap(), INSTALLER);
 
     let verified = updater.verify(downloaded.clone()).unwrap();
@@ -353,7 +364,7 @@ fn download_reports_progress_and_verifies() {
 fn download_can_be_cancelled() {
     let tmp = tempfile::tempdir().unwrap();
     let signer = Signer::new();
-    let signature = signer.sign(INSTALLER, "app-0.2.0-windows-x64.msi");
+    let signature = signer.sign(INSTALLER, &asset("app-0.2.0", "msi"));
     let cancel = Cancel::new();
     let (_, update, mut net) = staged(tmp.path(), signer.keys(), INSTALLER, &signature);
     net.cancel_on_read = Some(cancel.clone());
@@ -381,7 +392,7 @@ fn download_of_wrong_size_is_rejected() {
     let tmp = tempfile::tempdir().unwrap();
     let signer = Signer::new();
     for body in [&b"short"[..], &b"0123456789abcdef and a tail"[..]] {
-        let signature = signer.sign(body, "app-0.2.0-windows-x64.msi");
+        let signature = signer.sign(body, &asset("app-0.2.0", "msi"));
         let (updater, update, _net) = staged(tmp.path(), signer.keys(), body, &signature);
         let err = updater.download(&update, &Cancel::new(), &mut |_| {}).unwrap_err();
         assert!(matches!(err, UpdateError::SizeMismatch { expected: 16, .. }), "{err}");
@@ -406,7 +417,7 @@ fn rejected(keys: &'static [&'static str], installer: &[u8], signature: &str) ->
 #[test]
 fn replaced_file_is_rejected() {
     let signer = Signer::new();
-    let name = "app-0.2.0-windows-x64.msi";
+    let name = &asset("app-0.2.0", "msi");
     // Подпись настоящая, файл другой (тот же размер).
     let signature = signer.sign(INSTALLER, name);
     assert_eq!(
@@ -431,13 +442,13 @@ fn replaced_file_is_rejected() {
 #[test]
 fn old_signed_installer_is_not_accepted_as_new() {
     let signer = Signer::new();
-    let signature = signer.sign(INSTALLER, "app-0.1.0-windows-x64.msi");
+    let signature = signer.sign(INSTALLER, &asset("app-0.1.0", "msi"));
     assert_eq!(
         rejected(signer.keys(), INSTALLER, &signature),
         SignatureError::WrongFile
     );
     // Как и подписанный файл другого продукта.
-    let signature = signer.sign(INSTALLER, "other-0.2.0-windows-x64.msi");
+    let signature = signer.sign(INSTALLER, &asset("other-0.2.0", "msi"));
     assert_eq!(
         rejected(signer.keys(), INSTALLER, &signature),
         SignatureError::WrongFile
@@ -449,7 +460,7 @@ fn second_embedded_key_is_accepted() {
     let tmp = tempfile::tempdir().unwrap();
     let (old, new) = (Signer::new(), Signer::new());
     let keys: &'static [&'static str] = Box::leak(vec![old.keys()[0], new.keys()[0]].into_boxed_slice());
-    let signature = new.sign(INSTALLER, "app-0.2.0-windows-x64.msi");
+    let signature = new.sign(INSTALLER, &asset("app-0.2.0", "msi"));
     let (updater, update, _net) = staged(tmp.path(), keys, INSTALLER, &signature);
     let downloaded = updater.download(&update, &Cancel::new(), &mut |_| {}).unwrap();
     updater.verify(downloaded).unwrap();

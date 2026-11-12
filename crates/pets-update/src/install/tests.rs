@@ -205,3 +205,187 @@ fn result_is_taken_once() {
     assert_eq!(take_result(&product, tmp.path()), None);
     assert!(!tmp.path().join(helper_name(&product)).exists());
 }
+
+// ── Бандл macOS (.app из .zip) ──────────────────────────────────────────────────────────────────────────────────
+
+/// Старый бандл `App.app` в папке `Applications`: программа, ресурс, которого в новой версии нет.
+fn old_bundle(root: &Path) -> PathBuf {
+    let bundle = root.join("Applications").join("App.app");
+    fs::create_dir_all(bundle.join("Contents/MacOS")).unwrap();
+    fs::create_dir_all(bundle.join("Contents/Resources")).unwrap();
+    fs::write(bundle.join("Contents/MacOS/app"), "old app").unwrap();
+    fs::write(bundle.join("Contents/Resources/gone.txt"), "old only").unwrap();
+    bundle
+}
+
+#[test]
+fn app_bundle_is_found_from_exe() {
+    let exe = Path::new("/Applications/Postman.app/Contents/MacOS/postman");
+    assert_eq!(app_bundle(exe), Some(PathBuf::from("/Applications/Postman.app")));
+    assert_eq!(app_bundle(Path::new("/Users/me/target/release/postman")), None);
+    assert_eq!(
+        app_bundle(Path::new("/Applications/Postman/Contents/MacOS/postman")),
+        None
+    );
+}
+
+/// Бандл заменяется целиком: файлов старой версии не остаётся, `README.txt` и `__MACOSX/` архива не ставятся.
+#[test]
+fn bundle_is_replaced_whole() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = old_bundle(tmp.path());
+    let archive = zip_file(
+        tmp.path(),
+        &[
+            ("App.app/Contents/MacOS/app", "new app"),
+            ("App.app/Contents/Info.plist", "plist"),
+            ("README.txt", "readme"),
+            ("__MACOSX/App.app/._Info.plist", "rsrc"),
+        ],
+    );
+
+    apply_bundle(&File::open(&archive).unwrap(), &bundle, Path::new("app"), 1).unwrap();
+
+    assert_eq!(read(&bundle.join("Contents/MacOS/app")), "new app");
+    assert_eq!(read(&bundle.join("Contents/Info.plist")), "plist");
+    assert!(!bundle.join("Contents/Resources/gone.txt").exists());
+    let left: Vec<_> = fs::read_dir(bundle.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["App.app"]);
+}
+
+/// Архив без бандла или без программы в нём — ошибка, старый бандл на месте.
+#[test]
+fn bundle_rejects_archive_without_app() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = old_bundle(tmp.path());
+    for entries in [
+        &[("README.txt", "readme")][..],
+        &[("App.app/Contents/MacOS/other", "new")][..],
+        &[("A.app/Contents/MacOS/app", "a"), ("B.app/Contents/MacOS/app", "b")][..],
+    ] {
+        let archive = zip_file(tmp.path(), entries);
+        let err = apply_bundle(&File::open(&archive).unwrap(), &bundle, Path::new("app"), 1).unwrap_err();
+        assert!(matches!(err, UpdateError::Archive(_)), "{err}");
+        assert_eq!(read(&bundle.join("Contents/MacOS/app")), "old app");
+        assert_eq!(read(&bundle.join("Contents/Resources/gone.txt")), "old only");
+        let left: Vec<_> = fs::read_dir(bundle.parent().unwrap())
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["App.app"]);
+    }
+}
+
+/// Прошлая установка оборвалась после ухода старого бандла в запас: он возвращается и заменяется как обычно.
+#[test]
+fn bundle_restores_backup_of_interrupted_update() {
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = old_bundle(tmp.path());
+    let backup = bundle.with_file_name(format!("{BACKUP_DIR}-App.app"));
+    fs::rename(&bundle, &backup).unwrap();
+    let broken = zip_file(tmp.path(), &[("README.txt", "readme")]);
+
+    let err = apply_bundle(&File::open(&broken).unwrap(), &bundle, Path::new("app"), 1).unwrap_err();
+
+    assert!(matches!(err, UpdateError::Archive(_)), "{err}");
+    assert_eq!(read(&bundle.join("Contents/MacOS/app")), "old app");
+    assert!(!backup.exists());
+}
+
+/// Занятый файл в старом бандле (Windows не даёт переименовать папку): новая версия не ставится, старая цела.
+#[cfg(windows)]
+#[test]
+fn bundle_stays_when_busy() {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = old_bundle(tmp.path());
+    let archive = zip_file(tmp.path(), &[("App.app/Contents/MacOS/app", "new app")]);
+    let busy = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(bundle.join("Contents/MacOS/app"))
+        .unwrap();
+
+    let err = apply_bundle(&File::open(&archive).unwrap(), &bundle, Path::new("app"), 1).unwrap_err();
+    drop(busy);
+
+    assert!(matches!(err, UpdateError::Io { .. }), "{err}");
+    assert_eq!(read(&bundle.join("Contents/MacOS/app")), "old app");
+    let left: Vec<_> = fs::read_dir(bundle.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["App.app"]);
+}
+
+/// Unix: бит запуска и ссылки внутри бандла сохраняются; ссылка наружу — ошибка.
+#[cfg(unix)]
+#[test]
+fn bundle_keeps_modes_and_links() {
+    use std::os::unix::fs::PermissionsExt;
+    use zip::write::SimpleFileOptions;
+
+    let tmp = tempfile::tempdir().unwrap();
+    let bundle = old_bundle(tmp.path());
+    let archive = |links: &[(&str, &str)]| {
+        let path = tmp.path().join("update.zip");
+        let mut zip = zip::ZipWriter::new(File::create(&path).unwrap());
+        zip.start_file(
+            "App.app/Contents/MacOS/app",
+            SimpleFileOptions::default().unix_permissions(0o755),
+        )
+        .unwrap();
+        zip.write_all(b"new app").unwrap();
+        zip.start_file(
+            "App.app/Contents/Info.plist",
+            SimpleFileOptions::default().unix_permissions(0o644),
+        )
+        .unwrap();
+        zip.write_all(b"plist").unwrap();
+        for (name, target) in links {
+            zip.add_symlink(*name, *target, SimpleFileOptions::default()).unwrap();
+        }
+        zip.finish().unwrap();
+        path
+    };
+
+    let good = archive(&[("App.app/Contents/Current", "MacOS")]);
+    apply_bundle(&File::open(&good).unwrap(), &bundle, Path::new("app"), 1).unwrap();
+    let mode = fs::metadata(bundle.join("Contents/MacOS/app"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(mode & 0o777, 0o755);
+    let plist = fs::metadata(bundle.join("Contents/Info.plist"))
+        .unwrap()
+        .permissions()
+        .mode();
+    assert_eq!(plist & 0o111, 0);
+    assert_eq!(
+        fs::read_link(bundle.join("Contents/Current")).unwrap(),
+        Path::new("MacOS")
+    );
+
+    let evil = archive(&[("App.app/Contents/Out", "../../../outside")]);
+    let err = apply_bundle(&File::open(&evil).unwrap(), &bundle, Path::new("app"), 1).unwrap_err();
+    assert!(matches!(err, UpdateError::Archive(_)), "{err}");
+    assert_eq!(read(&bundle.join("Contents/MacOS/app")), "new app");
+}
+
+#[test]
+fn links_stay_inside_archive() {
+    assert!(link_inside(Path::new("A.app/Contents/Current"), Path::new("MacOS")));
+    assert!(link_inside(
+        Path::new("A.app/Contents/Frameworks/X/Current"),
+        Path::new("../../MacOS")
+    ));
+    assert!(!link_inside(
+        Path::new("A.app/Contents/Out"),
+        Path::new("../../../outside")
+    ));
+    assert!(!link_inside(Path::new("link"), Path::new("/etc/passwd")));
+}
