@@ -100,12 +100,13 @@ pub struct Downloaded {
     pub signature: PathBuf,
 }
 
-/// Артефакт с проверенной подписью. Пока значение живо, файл закрыт от записи другими процессами.
+/// Артефакт с проверенной подписью. Windows: пока значение живо, файл закрыт от записи другими процессами; установка
+/// (помощник) проверяет подпись ещё раз и ставит из проверенной копии.
 /// Единственный вход установки — [`Updater::install`](crate::Updater::install).
 #[derive(Debug)]
 pub struct Verified {
     pub(crate) downloaded: Downloaded,
-    pub(crate) _lock: File,
+    pub(crate) _lock: crate::verify::Payload,
 }
 
 impl Verified {

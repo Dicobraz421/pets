@@ -13,7 +13,7 @@
 //! При следующем старте продукт читает итог через [`take_result`].
 
 use std::fs::{self, File};
-use std::io::Read;
+use std::io::{Read, Seek};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -224,10 +224,11 @@ pub fn take_result(product: &Product, dir: &Path) -> Option<UpdateResult> {
     serde_json::from_slice(&bytes).ok()
 }
 
-/// Проверить подпись и поставить. Файл закрыт от записи от проверки до конца установки.
+/// Проверить подпись и поставить из проверенного содержимого: Windows — файл закрыт от записи до конца установки,
+/// Unix — распаковка из той же копии в памяти, что проверена.
 fn apply(keys: &[&str], job: &Job, msi: &mut dyn FnMut(&Path) -> Result<i32, UpdateError>) -> Result<(), UpdateError> {
     let signature = fs::read_to_string(&job.signature).map_err(io_err("read signature"))?;
-    let lock = verify::verify_file(keys, &job.name, &job.file, &signature)?;
+    let mut payload = verify::verify_file(keys, &job.name, &job.file, &signature)?;
     match job.kind {
         InstallKind::Msi => match msi(&job.file)? {
             // 3010 и 1641 — установлено, нужна или начата перезагрузка.
@@ -239,7 +240,7 @@ fn apply(keys: &[&str], job: &Job, msi: &mut dyn FnMut(&Path) -> Result<i32, Upd
                 .app_exe
                 .parent()
                 .ok_or(UpdateError::Invalid("app exe has no folder"))?;
-            apply_portable(&lock, app_dir, &job.keep, RENAME_ATTEMPTS)
+            apply_portable(&mut payload, app_dir, &job.keep, RENAME_ATTEMPTS)
         }
         InstallKind::AppBundle => {
             let bundle = app_bundle(&job.app_exe).ok_or(UpdateError::Invalid("program is not in an .app bundle"))?;
@@ -247,7 +248,7 @@ fn apply(keys: &[&str], job: &Job, msi: &mut dyn FnMut(&Path) -> Result<i32, Upd
                 .app_exe
                 .file_name()
                 .ok_or(UpdateError::Invalid("app exe has no name"))?;
-            apply_bundle(&lock, &bundle, Path::new(exe), RENAME_ATTEMPTS)
+            apply_bundle(&mut payload, &bundle, Path::new(exe), RENAME_ATTEMPTS)
         }
     }
 }
@@ -270,7 +271,12 @@ fn run_msiexec(file: &Path) -> Result<i32, UpdateError> {
 
 /// Распаковать архив в папку программы: сначала всё во временную подпапку, затем замена по одному файлу со
 /// старым в запасе; при ошибке — откат к прежним файлам. Файлы, которых нет в архиве, не трогаются.
-fn apply_portable(archive: &File, app_dir: &Path, keep: &[String], attempts: u32) -> Result<(), UpdateError> {
+fn apply_portable(
+    archive: impl Read + Seek,
+    app_dir: &Path,
+    keep: &[String],
+    attempts: u32,
+) -> Result<(), UpdateError> {
     let staging = app_dir.join(STAGING_DIR);
     let backup = app_dir.join(BACKUP_DIR);
     for dir in [&staging, &backup] {
@@ -318,7 +324,7 @@ fn apply_portable(archive: &File, app_dir: &Path, keep: &[String], attempts: u32
 /// Заменить бандл `.app` целиком новым из архива. Архив распаковывается рядом с бандлом (тот же том — замена
 /// переименованием); в нём ровно один `*.app` верхнего уровня с `Contents/MacOS/<exe>`, прочее (`README.txt`)
 /// не ставится. Старый бандл уходит в запас и возвращается, если новый не встал; после успеха запас удаляется.
-fn apply_bundle(archive: &File, bundle: &Path, exe: &Path, attempts: u32) -> Result<(), UpdateError> {
+fn apply_bundle(archive: impl Read + Seek, bundle: &Path, exe: &Path, attempts: u32) -> Result<(), UpdateError> {
     let parent = bundle
         .parent()
         .ok_or(UpdateError::Invalid("app bundle has no folder"))?;
@@ -376,7 +382,7 @@ fn new_bundle(staging: &Path, exe: &Path) -> Result<PathBuf, UpdateError> {
 /// Распаковать архив в `staging`; вернуть относительные пути файлов и ссылок. Путь, выходящий из папки, — ошибка.
 /// Unix: права файлов (бит запуска) — из архива; символьная ссылка — только внутрь распаковки. `__MACOSX/` (ресурсы
 /// и расширенные атрибуты, их кладёт `ditto --sequesterRsrc`) пропускается.
-fn extract(archive: &File, staging: &Path) -> Result<Vec<PathBuf>, UpdateError> {
+fn extract(archive: impl Read + Seek, staging: &Path) -> Result<Vec<PathBuf>, UpdateError> {
     let bad = |e: zip::result::ZipError| UpdateError::Archive(e.to_string());
     let mut zip = zip::ZipArchive::new(archive).map_err(bad)?;
     let mut files = Vec::new();
