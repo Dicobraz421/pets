@@ -2,6 +2,12 @@
 
 Новое решение — сверху, с датой.
 
+## 2026-11-12. gpui-kit 0.9.1 (gpui-pre 0.3.12) во всех крейтах pets (GKIT-01)
+
+Владелец (класс B согласован в чате): Pets и Postman — с gpui-kit 0.7.3 / gpui-pre =0.3.9 на 0.9.1 / =0.3.12.
+`pets-gpui-base` — снимок `gpui-base` 0.9.1, `pets-gpui-windows` — `gpui-pre-windows` 0.3.12, оба с прежними патчами
+(таблицы в их README). Публичное API крейтов pets не менялось; потребитель берёт все крейты с одного коммита и ставит
+`gpui-kit = "=0.9.1"` у себя. Шейдер `emoji_rasterization` убран вслед за upstream (эмодзи растрируются на CPU).
 ## 2026-11-12. Linux: pets-shell с API macOS (SHELL-LIN-01, Postman Linux tier 2)
 
 Владелец (Postman `docs/decisions/2026-11-12-linux.md`: Linux tier 2, стандарты freedesktop, без Flatpak). API

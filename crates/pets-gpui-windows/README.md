@@ -1,7 +1,7 @@
 # pets-gpui-windows
 
-Windows-платформа gpui с нашими патчами. Пакет называется как оригинал — `gpui-pre-windows` 0.3.9
-(снимок `gpui_windows` из zed@93d7456, Apache-2.0), чтобы подменять его через `[patch]`:
+Windows-платформа gpui с нашими патчами. Пакет называется как оригинал — `gpui-pre-windows` 0.3.12
+(снимок `gpui_windows` из zed@d2a4fb6, Apache-2.0), чтобы подменять его через `[patch]`:
 
 ```toml
 [patch.crates-io]

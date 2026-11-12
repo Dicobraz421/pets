@@ -23,7 +23,7 @@ windows-sys = "0.61"
 toml = "1.1"
 futures = { version = "0.3", default-features = false, features = ["std"] }
 # Версия как у приложений: одна сборка gpui на рабочую область потребителя.
-gpui-kit = "=0.7.3"
+gpui-kit = "=0.9.1"
 
 # «Не падать»: вне тестов нет unwrap/expect/panic!; в тестах разрешены (clippy.toml).
 [workspace.lints.clippy]
