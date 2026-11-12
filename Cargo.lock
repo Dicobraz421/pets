@@ -4749,6 +4749,7 @@ dependencies = [
  "objc2-core-foundation",
  "objc2-foundation 0.3.2",
  "objc2-service-management",
+ "oo7",
  "security-framework",
  "thiserror 2.0.21",
  "tracing",

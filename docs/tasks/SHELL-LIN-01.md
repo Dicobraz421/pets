@@ -3,7 +3,7 @@
 lane: shell
 status: done
 deps: []
-class: B                    # Cargo.lock (zbus 5.19 — копия gpui), docs/decisions.md
+class: B                    # Cargo.lock (oo7 0.6 + zbus 5.19 — копии gpui), docs/decisions.md
 files: [crates/pets-shell/Cargo.toml, crates/pets-shell/src/lib.rs, crates/pets-shell/src/clipboard.rs, crates/pets-shell/src/sys/, Cargo.lock, docs/decisions.md]
 read: [Postman docs/decisions/2026-11-12-linux.md, crates/pets-shell/src/sys/macos.rs]
 checks: [clippy linux/macos/windows -p pets-shell, nextest -p pets-shell]
@@ -13,7 +13,7 @@ manual: yes                 # шаги — ниже (файлы docs/manual-test
 
 ## Сделать
 - Единственный экземпляр — замок и unix-сокет `Pets.<app>.{lock,sock}` в `$XDG_RUNTIME_DIR` (код macOS → `sys/unix.rs`).
-- `credentials` — Secret Service (D-Bus, `zbus`); нет службы — `ShellError::Os` с `NotFound`, на диск не пишем.
+- `credentials` — Secret Service (`oo7::dbus::Service::encrypted`, только D-Bus); нет службы — `ShellError::Os` с `NotFound`, на диск не пишем.
 - `url_scheme` — `.desktop` этого исполняемого файла + `xdg-settings`/`xdg-mime` (`x-scheme-handler/mailto`).
 - `login_item` — `~/.config/autostart/<id>.desktop`.
 - `memory::phys_footprint` — `/proc/self/smaps_rollup`.
