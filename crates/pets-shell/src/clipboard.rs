@@ -4,7 +4,7 @@
 //! Формат — заголовок `Version:0.9`, смещения `StartHTML`/`EndHTML`/`StartFragment`/`EndFragment` (байты от начала
 //! буфера, UTF-8), необязательный `SourceURL`, затем документ с `<!--StartFragment-->…<!--EndFragment-->`. Разбор и
 //! сборка — здесь и без ОС ([`parse_cf_html`], [`encode_cf_html`]); чтение и запись — Windows (`sys::clipboard`),
-//! на других ОС HTML в буфере нет.
+//! macOS и Linux (`text/html`, `wl-paste`/`xclip`) — сам документ ([`parse_mac_html`]); запись на Linux — нет.
 //!
 //! HTML буфера — чужие данные: приложение разбирает его как письмо (в песочнице), здесь — только байты фрагмента.
 
@@ -128,7 +128,11 @@ pub fn has_html() -> bool {
     {
         crate::sys::clipboard::has_html(&crate::sys::clipboard::general())
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        crate::sys::clipboard::has_html()
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         false
     }
@@ -146,7 +150,11 @@ pub fn read_html(max: usize) -> Result<Option<Html>, ShellError> {
         let pb = crate::sys::clipboard::general();
         Ok(crate::sys::clipboard::read_html(&pb, max).and_then(|raw| parse_mac_html(&raw)))
     }
-    #[cfg(not(any(windows, target_os = "macos")))]
+    #[cfg(target_os = "linux")]
+    {
+        Ok(crate::sys::clipboard::read_html(max).and_then(|raw| parse_mac_html(&raw)))
+    }
+    #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
     {
         let _ = max;
         Ok(None)

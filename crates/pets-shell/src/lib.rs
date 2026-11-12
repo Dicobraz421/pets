@@ -24,6 +24,12 @@ pub use sys::{console, credentials, memory, registry, volume};
 #[cfg(target_os = "macos")]
 pub use sys::{console, credentials, login_item, managed, memory, url_scheme};
 
+/// Linux (SHELL-LIN-01, стандарты freedesktop): тот же API, что на macOS, без `managed`. `credentials` — Secret Service
+/// (D-Bus), `console::stderr_to_file`, `url_scheme` — `.desktop` и `xdg-utils`, `login_item` — XDG Autostart,
+/// `memory::phys_footprint` — `/proc/self/smaps_rollup`.
+#[cfg(target_os = "linux")]
+pub use sys::{console, credentials, login_item, memory, url_scheme};
+
 /// Ошибка оболочки процесса.
 #[derive(Debug, thiserror::Error)]
 pub enum ShellError {
@@ -85,7 +91,7 @@ impl Listener {
 /// `\\.\pipe\Pets.<app>.<session id>`. Второй экземпляр передаёт свои аргументы первому и получает `Second`
 /// (приложение выходит с кодом 0). Перед передачей — `AllowSetForegroundWindow(pid первого)`
 /// (`GetNamedPipeServerProcessId`), чтобы первый смог вывести окно на передний план. macOS — замок файла и unix-сокет
-/// в `$TMPDIR` пользователя. Другие ОС — всегда `First`.
+/// в `$TMPDIR` пользователя, Linux — то же в `$XDG_RUNTIME_DIR`. Другие ОС — всегда `First`.
 ///
 /// Ошибка — приложение работает как первый экземпляр и пишет предупреждение. Относительные пути в `args`
 /// второй экземпляр раскрывает сам: каталог у первого другой.

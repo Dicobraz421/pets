@@ -8,6 +8,29 @@
 `pets-gpui-base` — снимок `gpui-base` 0.9.1, `pets-gpui-windows` — `gpui-pre-windows` 0.3.12, оба с прежними патчами
 (таблицы в их README). Публичное API крейтов pets не менялось; потребитель берёт все крейты с одного коммита и ставит
 `gpui-kit = "=0.9.1"` у себя. Шейдер `emoji_rasterization` убран вслед за upstream (эмодзи растрируются на CPU).
+## 2026-11-12. Linux: pets-shell с API macOS (SHELL-LIN-01, Postman Linux tier 2)
+
+Владелец (Postman `docs/decisions/2026-11-12-linux.md`: Linux tier 2, стандарты freedesktop, без Flatpak). API
+добавлено для `target_os = "linux"`, прежнее не менялось; Windows и macOS по поведению не меняются:
+- `single_instance` — как на macOS (`flock` + unix-сокет), каталог `$XDG_RUNTIME_DIR` (нет — `temp_dir`, WARN); код
+  macOS перенесён в `sys/unix.rs`, `console_macos.rs` → `console_unix.rs`.
+- `pets_shell::credentials::{write, read, delete}` — Secret Service через `oo7` 0.6, только D-Bus-бэкенд (`oo7::dbus::Service::encrypted` — зашифрованный сеанс; не
+  `oo7::Keyring`: в песочнице он уходит в файл), фичи как у gpui-pre-linux (`async-std`, `native_crypto`) — новых
+  пакетов у Postman нет;
+  коллекция `default`, атрибуты `xdg:schema=org.pets.Credential`, `service`, `username`. Нет шины или службы —
+  `ShellError::Os` с `io::ErrorKind::NotFound`; на диск секрет не пишется. Заблокированная связка — запрос службы.
+- `pets_shell::console::stderr_to_file` — stderr закрыт или `/dev/null` → файл; поток в journald не трогаем.
+- `pets_shell::url_scheme::{bundle_id, set_default, default_handler, is_default}` — `bundle_id` = id `.desktop`, чей
+  `Exec` — этот исполняемый файл (`XDG_DATA_HOME`/`XDG_DATA_DIRS`); `set_default` — `xdg-settings`, запасной путь —
+  `xdg-mime default`; нет `.desktop` — ошибка (как вне `.app`). `.desktop` с `MimeType=x-scheme-handler/mailto;` —
+  в пакете приложения.
+- `pets_shell::login_item::{State, state, set, open_settings}` — XDG Autostart `~/.config/autostart/<id>.desktop`;
+  выключенная средой запись (`Hidden`, `X-GNOME-Autostart-enabled=false`) — `RequiresApproval`; `open_settings` —
+  каталог `autostart` через `xdg-open`.
+- `pets_shell::memory::phys_footprint()` — `Private_Clean + Private_Dirty + SwapPss` из `/proc/self/smaps_rollup`.
+- `pets_shell::clipboard::{has_html, read_html}` — `text/html` через `wl-paste` (Wayland) или `xclip` (X11), таймаут
+  2 с; UTF-16 с BOM (Firefox) декодируется; разбор — `parse_mac_html`. `write_html` на Linux — ошибка `Invalid`.
+- Зависимости Linux: `oo7` 0.6 и `zbus` 5.19 (`default-features = false`, `async-io`; не 6.x — вторая копия рядом с zbus 5 от gpui раздула бы Postman, решение оркестратора 2026-11-12), `libc` 0.2.191; Cargo.lock — класс B.
 
 ## 2026-11-12. macOS: бейдж на значке в Dock (Postman MAC-07)
 

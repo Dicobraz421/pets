@@ -1,9 +1,11 @@
-//! macOS: единственный экземпляр — замок файла `$TMPDIR/Pets.<app>.lock` (`flock`) и unix-сокет
-//! `$TMPDIR/Pets.<app>.sock` вместо именованного канала; `$TMPDIR` — свой у пользователя (права 0700). Журнала событий
-//! ОС нет: ошибки запуска — в stderr (`init_logging`).
+//! macOS и Linux: единственный экземпляр — замок файла `Pets.<app>.lock` (`flock`) и unix-сокет `Pets.<app>.sock`
+//! вместо именованного канала. Каталог — свой у пользователя: macOS — `$TMPDIR` (права 0700), Linux —
+//! `$XDG_RUNTIME_DIR` (`/run/user/<uid>`, 0700; нет — `/tmp`, предупреждение в журнал). Журнала событий ОС нет: ошибки
+//! запуска — в stderr (`init_logging`).
 //!
-//! Ссылки `mailto:` и файлы из Finder приходят первому экземпляру событием Apple (`on_open_urls` gpui), а не вторым
-//! процессом; сокет — для запуска из терминала и `open -n`.
+//! macOS: ссылки `mailto:` и файлы из Finder приходят первому экземпляру событием Apple (`on_open_urls` gpui), а не
+//! вторым процессом; сокет — для запуска из терминала и `open -n`. Linux: ссылку `mailto:` из `.desktop` (`%u`)
+//! передаёт второй процесс — через сокет.
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read as _, Write as _};
@@ -26,8 +28,28 @@ pub(crate) struct Guard {
     listener: UnixListener,
 }
 
+#[cfg(target_os = "macos")]
+fn dir() -> PathBuf {
+    std::env::temp_dir()
+}
+
+/// `$XDG_RUNTIME_DIR` (абсолютный путь), иначе `/tmp` — общий каталог: имя сокета видно всем, подключиться можно
+/// только с правами на файл (0600 по umask пользователя).
+#[cfg(target_os = "linux")]
+fn dir() -> PathBuf {
+    static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    DIR.get_or_init(|| match std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+        Some(d) if d.is_absolute() => d,
+        _ => {
+            tracing::warn!(target: "pets_shell", "XDG_RUNTIME_DIR is not set: instance socket in temp dir");
+            std::env::temp_dir()
+        }
+    })
+    .clone()
+}
+
 fn path(app: &str, ext: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("Pets.{app}.{ext}"))
+    dir().join(format!("Pets.{app}.{ext}"))
 }
 
 fn os(what: &'static str, source: std::io::Error) -> ShellError {
