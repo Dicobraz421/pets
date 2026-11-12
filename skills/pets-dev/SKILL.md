@@ -26,7 +26,8 @@ description: Процесс разработки приложений Pets (Ур
 - Волна: 3–5 задач; задачи <30 мин работы обязательно собирать в волну.
 - CI на PR и в merge queue: ≤7 мин. Docs-PR: 0 мин сборки (job `changes`). Release, размер, smoke, архив, подпись — только main и теги `v*`.
 - Выпуски — GitHub Releases по тегу `v<версия>`: `<app>-<версия>-<os>-<arch>.zip`, компоненты под своими именами,
-  `SHA256SUMS.txt`; платформа — строка matrix (`references/releases.md`, решение 2026-11-01).
+  `SHA256SUMS.txt`; платформа — строка matrix (`references/releases.md`, решение 2026-11-01). Гейт выпуска — полная
+  сверка документации `docs/releases/<версия>.md`, job `docs-gate` (`templates/release_docs_check.py`, решение 2026-11-12).
 - Merge queue: метод **merge** (merge-коммит; коммиты задач сохраняются без переписывания), группа ≤4, min 1,
   ожидание 2 мин, required check — `gate`. Rebase переписывает коммиты нижнего PR цепочки: верхний видит чужие файлы,
   требует update-branch или пересоздания (ThePost, 2026-10-31).

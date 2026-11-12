@@ -8,7 +8,23 @@
 
 - Тег `v<версия>` = `version` в `Cargo.toml` (CI сверяет, иначе красный). Без дефиса — стабильный выпуск, с дефисом
   (`v0.2.0-beta.1`) — предварительный (`--prerelease`).
-- Выпустить: PR с новой версией (класс B) → merge → тег на `origin/main` → push тега. Остальное делает CI.
+- Выпустить: PR с новой версией и сверкой документации (класс B) → merge → тег на `origin/main` → push тега.
+  Остальное делает CI.
+
+## Гейт документации
+
+Решение владельца 2026-11-12 (Postman `docs/decisions/2026-11-12-release-docs-gate.md`): выпуск — только после полной
+сверки документации. Документы догоняют код к каждому выпуску, а не по случаю.
+
+- В PR с новой версией — `docs/releases/<версия>.md`: каждый документ отмечен `[x]` и с итогом («обновлено: что, PR»
+  или «без изменений»). Что устарело — исправить в том же PR или раньше своими PR по полосам; генерируемые документы
+  пересобирает полоса docs-gen до тега.
+- Какие документы — glob'ы без рекурсии, у приложения свои: всё `*.md` в корне и в `docs/`, `README.txt` комплекта,
+  шаблон описания выпуска. Новый документ гейт требует сам — список руками не ведётся.
+- Проверка — `templates/release_docs_check.py` (копия в приложении: `.github/` или `ci/`): job `docs-gate` на теге,
+  ubuntu, до сборки; `publish` — `needs: [..., docs-gate]`. Нет файла, пустая отметка, нет итога, пропущенный или
+  несуществующий документ — выпуск не публикуется.
+- Шаблон сверки — `python3 <скрипт> --template <glob>...` (или `docs/releases/TEMPLATE.md` приложения).
 
 ## Файлы выпуска — плоско
 
@@ -35,6 +51,7 @@
 
 - Job `release` — matrix по платформам (`platform: windows-x64`, `runner`). Скрипт упаковки платформы отдаёт `name`,
   `dir`, `assets`, `version`; на теге — проверка «тег = версия» и артефакт `release-<platform>`.
-- Job `publish` — ubuntu, `contents: write`, `needs: [test, release]`, только на теге: скачивает `release-*`, считает
+- Job `docs-gate` — ubuntu, только на теге: `python3 <путь>/release_docs_check.py "${GITHUB_REF_NAME#v}" <glob>...`.
+- Job `publish` — ubuntu, `contents: write`, `needs: [test, release, docs-gate]`, только на теге: скачивает `release-*`, считает
   `SHA256SUMS.txt`, `gh release create --verify-tag`.
 - Linux — строка matrix и `scripts/linux/package.sh` с теми же выходами; `publish` не меняется.
