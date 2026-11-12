@@ -1,14 +1,20 @@
 //! Платформенный код: единственный экземпляр, журнал событий ОС, реестр, учётные данные, стандартные потоки, разбивка
-//! памяти, буфер обмена (HTML). `unsafe` — только здесь.
+//! памяти, буфер обмена (HTML); macOS — экземпляр через unix-сокет, Связка ключей, обработчик схемы адресов, поток
+//! ошибок в файл. `unsafe` — только здесь.
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub(crate) use windows::*;
 
-#[cfg(not(windows))]
+#[cfg(target_os = "macos")]
+mod macos;
+#[cfg(target_os = "macos")]
+pub(crate) use macos::*;
+
+#[cfg(not(any(windows, target_os = "macos")))]
 mod other;
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 pub(crate) use other::*;
 
 #[cfg(windows)]
@@ -23,6 +29,15 @@ pub mod memory;
 pub mod registry;
 #[cfg(windows)]
 pub mod volume;
+
+#[cfg(target_os = "macos")]
+#[path = "console_macos.rs"]
+pub mod console;
+#[cfg(target_os = "macos")]
+#[path = "credentials_macos.rs"]
+pub mod credentials;
+#[cfg(target_os = "macos")]
+pub mod url_scheme;
 
 /// Строка UTF-16 с нулём в конце — для `PCWSTR`.
 #[cfg(windows)]

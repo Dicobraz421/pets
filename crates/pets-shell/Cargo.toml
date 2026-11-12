@@ -1,6 +1,6 @@
 [package]
 name = "pets-shell"
-description = "Жизненный цикл процесса приложения Pets: журнал, паники, фатальные ошибки, единственный экземпляр, реестр, учётные данные — без UI"
+description = "Жизненный цикл процесса приложения Pets: журнал, паники, фатальные ошибки, единственный экземпляр, реестр, учётные данные — без UI (Windows, macOS)"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -34,6 +34,12 @@ windows-sys = { workspace = true, features = [
     "Win32_UI_Shell_PropertiesSystem",
     "Win32_UI_WindowsAndMessaging",
 ] }
+
+# macOS (Postman MAC-02): Связка ключей, LaunchServices (CFString), стандартный поток ошибок в файл.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = "3.7.0"
+core-foundation = "0.10.1"
+libc = "0.2.191"
 
 [lints]
 workspace = true

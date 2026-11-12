@@ -1,0 +1,52 @@
+[package]
+name = "pets-gpui-macos"
+description = "Платформенный код окна приложений Pets на macOS за нейтральным API (аналог `gpui_windows::pets`): номер и снимок окна, перетаскивание файлов, уведомления центра уведомлений"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+
+# Только macOS (Apple Silicon, macOS 13+); на других ОС крейт пуст. gpui не нужен: окно — через `raw-window-handle`.
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "0.6.2"
+tracing.workspace = true
+objc2 = "0.6.5"
+block2 = "0.6.2"
+objc2-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSArray",
+    "NSBundle",
+    "NSError",
+    "NSGeometry",
+    "NSObject",
+    "NSString",
+    "NSURL",
+] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSDragging",
+    "NSDraggingItem",
+    "NSDraggingSession",
+    "NSEvent",
+    "NSGraphics",
+    "NSImage",
+    "NSPasteboard",
+    "NSResponder",
+    "NSView",
+    "NSWindow",
+    "NSWorkspace",
+] }
+objc2-user-notifications = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "UNNotification",
+    "UNNotificationContent",
+    "UNNotificationRequest",
+    "UNNotificationSound",
+    "UNNotificationTrigger",
+    "UNUserNotificationCenter",
+] }
+
+[lints]
+workspace = true
