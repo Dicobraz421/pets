@@ -1,21 +1,26 @@
 //! Платформенный код: единственный экземпляр, журнал событий ОС, реестр, учётные данные, стандартные потоки, разбивка
 //! памяти, буфер обмена (HTML); macOS — экземпляр через unix-сокет, Связка ключей, обработчик схемы адресов, поток
-//! ошибок в файл, буфер обмена (HTML), объект входа, управляемые настройки, память процесса. `unsafe` — только здесь.
+//! ошибок в файл, буфер обмена (HTML), объект входа, управляемые настройки, память процесса; Linux — то же по
+//! стандартам freedesktop (Secret Service, `.desktop`, `xdg-mime`, `/proc`). `unsafe` — только здесь.
 
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
 pub(crate) use windows::*;
 
-#[cfg(target_os = "macos")]
-mod macos;
-#[cfg(target_os = "macos")]
-pub(crate) use macos::*;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod unix;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) use unix::*;
 
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 mod other;
-#[cfg(not(any(windows, target_os = "macos")))]
+#[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub(crate) use other::*;
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+#[path = "console_unix.rs"]
+pub mod console;
 
 #[cfg(windows)]
 pub(crate) mod clipboard;
@@ -34,9 +39,6 @@ pub mod volume;
 #[path = "clipboard_macos.rs"]
 pub(crate) mod clipboard;
 #[cfg(target_os = "macos")]
-#[path = "console_macos.rs"]
-pub mod console;
-#[cfg(target_os = "macos")]
 #[path = "credentials_macos.rs"]
 pub mod credentials;
 #[cfg(target_os = "macos")]
@@ -48,6 +50,24 @@ pub mod managed;
 #[path = "memory_macos.rs"]
 pub mod memory;
 #[cfg(target_os = "macos")]
+pub mod url_scheme;
+
+#[cfg(target_os = "linux")]
+#[path = "clipboard_linux.rs"]
+pub(crate) mod clipboard;
+#[cfg(target_os = "linux")]
+#[path = "credentials_linux.rs"]
+pub mod credentials;
+#[cfg(target_os = "linux")]
+mod desktop;
+#[cfg(target_os = "linux")]
+#[path = "login_item_linux.rs"]
+pub mod login_item;
+#[cfg(target_os = "linux")]
+#[path = "memory_linux.rs"]
+pub mod memory;
+#[cfg(target_os = "linux")]
+#[path = "url_scheme_linux.rs"]
 pub mod url_scheme;
 
 /// Строка UTF-16 с нулём в конце — для `PCWSTR`.

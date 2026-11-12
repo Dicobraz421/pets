@@ -1,4 +1,5 @@
-//! macOS: поток ошибок процесса, запущенного из Finder или Dock (launchd отдаёт ему `/dev/null`), — в файл журнала.
+//! macOS и Linux: поток ошибок процесса, запущенного без терминала, — в файл журнала. macOS: Finder и Dock (launchd
+//! отдаёт `/dev/null`). Linux: stderr закрыт или `/dev/null`; поток в systemd-journald (сокет) — уже журнал, не трогаем.
 
 use std::os::fd::IntoRawFd as _;
 use std::path::Path;
@@ -18,7 +19,7 @@ fn stderr_is_void() -> bool {
     }
 }
 
-/// Процесс без терминала (Finder, Dock): поток ошибок — в файл `path` (дозапись), туда пишет `tracing`. stderr —
+/// Процесс без терминала (Finder, Dock; на Linux — stderr в `/dev/null`): поток ошибок — в файл `path` (дозапись), туда пишет `tracing`. stderr —
 /// терминал, файл или канал — ничего. `Ok(true)` — журнал пишется в файл.
 pub fn stderr_to_file(path: &Path) -> Result<bool, ShellError> {
     if !stderr_is_void() {
