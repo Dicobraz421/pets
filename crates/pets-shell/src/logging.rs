@@ -1,4 +1,7 @@
-//! Журнал процесса: tracing в stderr, `log` через tracing-log, ERROR и паники — ещё и в журнал Windows.
+//! Журнал процесса: tracing в stderr, `log` через tracing-log; системный журнал (Windows «Приложение») — слоем
+//! [`SystemLog`]: ERROR — «Ошибка», WARN — «Предупреждение», INFO — «Сведения», паники и фатальные ошибки — своими
+//! кодами ([`EventId`]). Что пропустит фильтр (настройка «Уровень журнала» приложения), то и попадёт в системный
+//! журнал, но не подробнее INFO: DEBUG и TRACE — только в файл. Какое событие какого уровня — `LOGGING.md` крейта.
 
 use std::collections::HashMap;
 use std::fmt::Write as _;
@@ -16,11 +19,61 @@ use crate::sys;
 
 /// Фильтр, если переменная не задана.
 const DEFAULT_FILTER: &str = "info";
+/// Цель события паники (хук [`init_logging`]): в системном журнале — [`EventId::Crash`].
+pub const PANIC_TARGET: &str = "panic";
+/// Цель фатальной ошибки запуска ([`fatal`]): [`EventId::StartupFailed`].
+pub const FATAL_TARGET: &str = "fatal";
+
+/// Код события системного журнала, общий для приложений Pets; важность (тип записи) — от кода.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum EventId {
+    /// Паника.
+    Crash = 1000,
+    /// Событие ERROR.
+    Error = 1001,
+    /// Запуск невозможен.
+    StartupFailed = 1002,
+    /// Событие WARN.
+    Warning = 1003,
+    /// Событие INFO.
+    Info = 1004,
+}
+
+/// Тип записи системного журнала.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Severity {
+    Error,
+    Warning,
+    Info,
+}
+
+impl EventId {
+    pub(crate) fn severity(self) -> Severity {
+        match self {
+            EventId::Crash | EventId::Error | EventId::StartupFailed => Severity::Error,
+            EventId::Warning => Severity::Warning,
+            EventId::Info => Severity::Info,
+        }
+    }
+
+    /// Код события tracing по уровню и цели; DEBUG и TRACE — не для системного журнала.
+    pub fn of(level: Level, target: &str) -> Option<EventId> {
+        match level {
+            Level::ERROR if target == PANIC_TARGET => Some(EventId::Crash),
+            Level::ERROR if target == FATAL_TARGET => Some(EventId::StartupFailed),
+            Level::ERROR => Some(EventId::Error),
+            Level::WARN => Some(EventId::Warning),
+            Level::INFO => Some(EventId::Info),
+            _ => None,
+        }
+    }
+}
 
 /// Журнал: tracing в stderr (уровень из переменной `env_var`, напр. POSTMAN_LOG, по умолчанию info;
 /// формат filter::Targets — "info,gpui=warn"), записи `log` (gpui) тоже идут сюда (tracing-log);
-/// события ERROR и паники дублируются в журнал Windows «Приложение» с источником `app`.
-/// Хук паники: сообщение+место → tracing::error!(target: "panic") и журнал Windows, затем прежний хук.
+/// системный журнал — [`SystemLog`] с источником `app`, тот же фильтр.
+/// Хук паники: сообщение+место → tracing::error!(target: "panic") и системный журнал, затем прежний хук.
 ///
 /// Повторный вызов — без эффекта (подписчик уже стоит; пишется предупреждение).
 pub fn init_logging(app: &str, env_var: &str) {
@@ -30,14 +83,13 @@ pub fn init_logging(app: &str, env_var: &str) {
         Some(Err(e)) => (default_targets(), Some(e)),
         None => (default_targets(), None),
     };
-    sys::event_source(app);
     let stderr = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_ansi(std::io::stderr().is_terminal());
     let installed = tracing_subscriber::registry()
         .with(targets)
         .with(stderr)
-        .with(EventLogLayer::default())
+        .with(SystemLog::new(app))
         .try_init();
     if let Err(e) = installed {
         tracing::warn!(target: "pets_shell", "журнал уже настроен: {e}");
@@ -49,11 +101,17 @@ pub fn init_logging(app: &str, env_var: &str) {
     install_panic_hook();
 }
 
-/// Запуск невозможен: tracing::error! (→ журнал Windows), eprintln, exit(1).
+/// Запуск невозможен: tracing::error! (→ системный журнал, [`EventId::StartupFailed`]), eprintln, exit(1).
 pub fn fatal(what: &str, e: impl std::fmt::Display) -> ! {
     tracing::error!(target: "fatal", "{what}: {e}");
     eprintln!("{what}: {e}");
     std::process::exit(1)
+}
+
+/// Записать событие в системный журнал сразу, без tracing и без ограничения повторов (падение, записанное своим
+/// обработчиком). Источник открывает [`SystemLog::new`] (или [`init_logging`]); до этого — ничего.
+pub fn system_event(id: EventId, text: &str) {
+    sys::report_event(id, text);
 }
 
 fn default_targets() -> Targets {
@@ -77,31 +135,60 @@ fn install_panic_hook() {
     }));
 }
 
-/// Слой tracing: события ERROR → журнал Windows (сообщение и поля одной строкой), с ограничением повторов
-/// ([`Throttle`]): ошибка, которая сыплется на каждом кадре (gpui: «unable to get cursor position» при
-/// заблокированном экране), не забивает журнал.
-#[derive(Default)]
-struct EventLogLayer {
-    throttle: Mutex<Throttle>,
+/// Слой tracing → системный журнал (Windows «Приложение», источник — имя приложения): ERROR, WARN и INFO, которые
+/// пропустил фильтр подписчика (настройка «Уровень журнала»), — сообщение и поля одной строкой, код — [`EventId`].
+/// Повторы ограничены ([`Throttle`]; у каждой важности свой счёт — сведения не вытесняют ошибок): ошибка, которая
+/// сыплется на каждом кадре (gpui: «unable to get cursor position» при заблокированном экране), не забивает журнал.
+/// Паники — всегда. Приложению со своим подписчиком (файл, Tracy): `registry().with(фильтр).with(SystemLog::new(имя))`.
+pub struct SystemLog {
+    throttle: Mutex<[Throttle; 3]>,
+    skip: Vec<&'static str>,
 }
 
-impl<S: Subscriber> Layer<S> for EventLogLayer {
+impl SystemLog {
+    /// Слой с источником `app` (источник открывается один раз за процесс).
+    pub fn new(app: &str) -> SystemLog {
+        sys::event_source(app);
+        SystemLog {
+            throttle: Mutex::default(),
+            skip: Vec::new(),
+        }
+    }
+
+    /// События этой цели не писать: приложение пишет их само ([`system_event`]).
+    #[must_use]
+    pub fn skip_target(mut self, target: &'static str) -> SystemLog {
+        self.skip.push(target);
+        self
+    }
+
+    /// Что записать: код и строку (с числом пропущенных повторов) или ничего.
+    fn admit(&self, level: Level, target: &str, line: String, now: Instant) -> Option<(EventId, String)> {
+        if self.skip.contains(&target) {
+            return None;
+        }
+        let id = EventId::of(level, target)?;
+        if id == EventId::Crash {
+            return Some((id, line));
+        }
+        let slot = match id.severity() {
+            Severity::Error => 0,
+            Severity::Warning => 1,
+            Severity::Info => 2,
+        };
+        let mut t = self.throttle.lock().unwrap_or_else(PoisonError::into_inner);
+        t[slot].admit(line, now).map(|l| (id, l))
+    }
+}
+
+impl<S: Subscriber> Layer<S> for SystemLog {
     fn on_event(&self, event: &Event<'_>, _ctx: Context<'_, S>) {
-        if *event.metadata().level() != Level::ERROR {
+        let meta = event.metadata();
+        if *meta.level() > Level::INFO {
             return;
         }
-        let line = event_line(event);
-        // Паники — всегда: их мало, и каждая важна.
-        let line = if event.metadata().target() == "panic" {
-            Some(line)
-        } else {
-            self.throttle
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .admit(line, Instant::now())
-        };
-        if let Some(line) = line {
-            sys::report_error(&line);
+        if let Some((id, line)) = self.admit(*meta.level(), meta.target(), event_line(event), Instant::now()) {
+            sys::report_event(id, &line);
         }
     }
 }
@@ -218,6 +305,48 @@ mod tests {
         assert_eq!(admitted, Throttle::PER_MINUTE as usize);
         assert!(t.admit("next".into(), t1 + Duration::from_secs(61)).is_some());
         assert!(t.seen.len() <= Throttle::REMEMBER + 1);
+    }
+
+    /// Код и важность — по уровню и цели; DEBUG — мимо; у важностей свой счёт повторов; паника — всегда.
+    #[test]
+    fn levels_map_to_event_ids() {
+        assert_eq!(EventId::of(Level::ERROR, "imap"), Some(EventId::Error));
+        assert_eq!(EventId::of(Level::ERROR, PANIC_TARGET), Some(EventId::Crash));
+        assert_eq!(EventId::of(Level::ERROR, FATAL_TARGET), Some(EventId::StartupFailed));
+        assert_eq!(EventId::of(Level::WARN, "imap"), Some(EventId::Warning));
+        assert_eq!(EventId::of(Level::INFO, "app"), Some(EventId::Info));
+        assert_eq!(
+            (EventId::of(Level::DEBUG, "app"), EventId::of(Level::TRACE, "app")),
+            (None, None)
+        );
+        assert_eq!(EventId::Warning.severity(), Severity::Warning);
+        assert_eq!(EventId::StartupFailed as u32, 1002);
+
+        let log = SystemLog {
+            throttle: Mutex::default(),
+            skip: vec!["urfin::crash"],
+        };
+        let now = Instant::now();
+        for i in 0..Throttle::PER_MINUTE {
+            assert!(log.admit(Level::INFO, "app", format!("i{i}"), now).is_some());
+        }
+        assert!(
+            log.admit(Level::INFO, "app", "лишнее".into(), now).is_none(),
+            "у сведений свой предел"
+        );
+        assert_eq!(
+            log.admit(Level::ERROR, "imap", "ошибка".into(), now),
+            Some((EventId::Error, "ошибка".into()))
+        );
+        assert_eq!(
+            log.admit(Level::WARN, "imap", "отказ".into(), now).map(|x| x.0),
+            Some(EventId::Warning)
+        );
+        assert!(log.admit(Level::ERROR, "urfin::crash", "сам".into(), now).is_none());
+        assert!(log.admit(Level::DEBUG, "app", "детали".into(), now).is_none());
+        for _ in 0..3 {
+            assert!(log.admit(Level::ERROR, PANIC_TARGET, "паника".into(), now).is_some());
+        }
     }
 
     #[test]

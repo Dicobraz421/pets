@@ -9,7 +9,7 @@ mod logging;
 mod message;
 mod sys;
 
-pub use logging::{fatal, init_logging};
+pub use logging::{EventId, FATAL_TARGET, PANIC_TARGET, SystemLog, fatal, init_logging, system_event};
 
 /// Платформенный код приложений без UI (решение владельца 2026-10-28): реестр, учётные данные, стандартные потоки
 /// процесса без консоли, разбивка памяти для бенча, шифрование тома BitLocker. Только Windows; `unsafe` — внутри
