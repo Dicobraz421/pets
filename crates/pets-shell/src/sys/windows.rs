@@ -13,7 +13,9 @@ use windows_sys::Win32::Storage::FileSystem::{
     CreateFileW, FILE_FLAG_FIRST_PIPE_INSTANCE, FILE_READ_ATTRIBUTES, OPEN_EXISTING, PIPE_ACCESS_INBOUND, ReadFile,
     SECURITY_IDENTIFICATION, SECURITY_SQOS_PRESENT, WriteFile,
 };
-use windows_sys::Win32::System::EventLog::{EVENTLOG_ERROR_TYPE, RegisterEventSourceW, ReportEventW};
+use windows_sys::Win32::System::EventLog::{
+    EVENTLOG_ERROR_TYPE, EVENTLOG_INFORMATION_TYPE, EVENTLOG_WARNING_TYPE, RegisterEventSourceW, ReportEventW,
+};
 use windows_sys::Win32::System::Pipes::{
     ConnectNamedPipe, CreateNamedPipeW, DisconnectNamedPipe, GetNamedPipeServerProcessId, PIPE_READMODE_MESSAGE,
     PIPE_REJECT_REMOTE_CLIENTS, PIPE_TYPE_MESSAGE, PIPE_WAIT, WaitNamedPipeW,
@@ -23,14 +25,13 @@ use windows_sys::Win32::System::Threading::{CreateMutexW, GetCurrentProcessId};
 use windows_sys::Win32::UI::WindowsAndMessaging::AllowSetForegroundWindow;
 
 use crate::ShellError;
+use crate::logging::{EventId, Severity};
 use crate::message::MAX_LEN;
 
 /// Сколько второй экземпляр ждёт канал первого (тот мог взять mutex и ещё не создать канал).
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 /// Пауза между попытками, пока канала нет.
 const RETRY: Duration = Duration::from_millis(50);
-/// Код события в журнале Windows — один на все записи (под него регистрирует источник установщик).
-const EVENT_ID: u32 = 1000;
 /// Предел строки события в UTF-16 (у ReportEventW — 31 839).
 const EVENT_MAX_UTF16: usize = 31_000;
 
@@ -255,8 +256,8 @@ pub(crate) fn event_source(app: &str) {
     });
 }
 
-/// Записать ошибку одной строкой в журнал Windows. Без источника — ничего.
-pub(crate) fn report_error(text: &str) {
+/// Записать событие одной строкой в журнал Windows: код — [`EventId`], тип — по его важности. Без источника — ничего.
+pub(crate) fn report_event(id: EventId, text: &str) {
     let Some(Some(source)) = SOURCE.get() else {
         return;
     };
@@ -274,9 +275,13 @@ pub(crate) fn report_error(text: &str) {
     unsafe {
         ReportEventW(
             source.0,
-            EVENTLOG_ERROR_TYPE,
+            match id.severity() {
+                Severity::Error => EVENTLOG_ERROR_TYPE,
+                Severity::Warning => EVENTLOG_WARNING_TYPE,
+                Severity::Info => EVENTLOG_INFORMATION_TYPE,
+            },
             0,
-            EVENT_ID,
+            id as u32,
             null_mut(),
             1,
             0,

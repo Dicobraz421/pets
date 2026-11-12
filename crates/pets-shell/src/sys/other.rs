@@ -19,4 +19,4 @@ pub(crate) fn serve(_guard: Guard, _on_message: &dyn Fn(Vec<u8>)) {}
 
 pub(crate) fn event_source(_app: &str) {}
 
-pub(crate) fn report_error(_text: &str) {}
+pub(crate) fn report_event(_id: crate::logging::EventId, _text: &str) {}
