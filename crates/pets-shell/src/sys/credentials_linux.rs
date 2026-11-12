@@ -78,18 +78,25 @@ async fn delete_in(collection: &Collection, target: &str) -> Result<(), ShellErr
     Ok(())
 }
 
-/// Записать (заменить) секрет `secret` пользователя `user` под именем `target`.
+/// Записать (заменить) секрет `secret` пользователя `user` под именем `target` — за один шаг: `CreateItem` с
+/// `replace=true` заменяет элемент с теми же атрибутами (как `CredWriteW`); сбой — прежний секрет цел. Записи того же
+/// имени с другим пользователем удаляются только после успешной записи: имя одно — запись одна.
 pub fn write(target: &str, user: &str, secret: &str) -> Result<(), ShellError> {
     zbus::block_on(async {
         let collection = collection().await?;
-        // Прежняя запись могла быть с другим пользователем: имя одно — запись одна.
-        delete_in(&collection, target).await?;
         let attrs = [("xdg:schema", SCHEMA), ("service", target), ("username", user)];
-        collection
+        let created = collection
             .create_item(target, &attrs, oo7::Secret::text(secret), true, None)
             .await
-            .map(drop)
-            .map_err(|e| os("CreateItem", e))
+            .map_err(|e| os("CreateItem", e))?;
+        let items = collection
+            .search_items(&[("xdg:schema", SCHEMA), ("service", target)])
+            .await
+            .map_err(|e| os("SearchItems", e))?;
+        for item in items.iter().filter(|i| i.path() != created.path()) {
+            item.delete(None).await.map_err(|e| os("Item.Delete", e))?;
+        }
+        Ok(())
     })
 }
 

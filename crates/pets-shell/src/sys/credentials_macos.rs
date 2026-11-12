@@ -3,8 +3,11 @@
 //! (ACL по подписи; при ad-hoc подписи новая сборка один раз спросит разрешение). Секрет не попадает в ошибки — только
 //! код `OSStatus`; копия в памяти при записи затирается.
 
+use core_foundation::data::CFData;
 use security_framework::base::Error;
-use security_framework::item::{ItemClass, ItemSearchOptions, Limit, SearchResult};
+use security_framework::item::{
+    ItemClass, ItemSearchOptions, ItemUpdateOptions, ItemUpdateValue, Limit, SearchResult, update_item,
+};
 use security_framework::passwords::set_generic_password;
 
 use crate::ShellError;
@@ -25,12 +28,20 @@ fn search(target: &str) -> ItemSearchOptions {
     options
 }
 
-/// Записать (заменить) секрет `secret` пользователя `user` под именем `target`.
+/// Записать (заменить) секрет `secret` пользователя `user` под именем `target` — за один шаг: `SecItemUpdate`
+/// (секрет и пользователь), записи нет — `SecItemAdd` (как `CredWriteW`); сбой — прежний секрет цел.
 pub fn write(target: &str, user: &str, secret: &str) -> Result<(), ShellError> {
-    // Прежняя запись могла быть с другим пользователем: служба одна — запись одна.
-    delete(target)?;
     let mut blob = secret.as_bytes().to_vec();
-    let result = set_generic_password(target, user, &blob).map_err(|e| os("SecItemAdd", e));
+    let mut update = ItemUpdateOptions::new();
+    update
+        .set_value(ItemUpdateValue::Data(CFData::from_buffer(&blob)))
+        .set_account_name(user);
+    let result = match update_item(&search(target), &update) {
+        Ok(()) => Ok(()),
+        Err(e) if e.code() == NOT_FOUND => set_generic_password(target, user, &blob).map_err(|e| os("SecItemAdd", e)),
+        Err(e) => Err(os("SecItemUpdate", e)),
+    };
+    drop(update);
     blob.fill(0);
     result
 }
