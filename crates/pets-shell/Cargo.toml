@@ -36,10 +36,24 @@ windows-sys = { workspace = true, features = [
 ] }
 
 # macOS (Postman MAC-02): Связка ключей, LaunchServices (CFString), стандартный поток ошибок в файл.
+# MAC-04: HTML буфера обмена (`NSPasteboard`), вход в систему (`SMAppService`), управляемые настройки
+# (`CFPreferences`), память процесса (`proc_pid_rusage`).
 [target.'cfg(target_os = "macos")'.dependencies]
 security-framework = "3.7.0"
 core-foundation = "0.10.1"
 libc = "0.2.191"
+objc2 = "0.6.5"
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSArray", "NSData", "NSError", "NSString"] }
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSPasteboard"] }
+objc2-service-management = { version = "0.3.2", default-features = false, features = ["std", "SMAppService", "objc2", "objc2-foundation"] }
+objc2-core-foundation = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "CFBase",
+    "CFNumber",
+    "CFPreferences",
+    "CFPropertyList",
+    "CFString",
+] }
 
 [lints]
 workspace = true

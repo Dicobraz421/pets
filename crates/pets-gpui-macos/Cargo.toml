@@ -16,6 +16,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSArray",
     "NSBundle",
+    "NSEnumerator",
     "NSError",
     "NSGeometry",
     "NSObject",
@@ -37,12 +38,24 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSWindow",
     "NSWorkspace",
 ] }
+# MAC-04: снимок окна — ScreenCaptureKit (macOS 14.4+: содержимое своего процесса без разрешения «Запись экрана»).
+objc2-screen-capture-kit = { version = "0.3.2", default-features = false, features = [
+    "std",
+    "block2",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "SCScreenshotManager",
+    "SCShareableContent",
+    "SCStream",
+] }
+objc2-core-graphics = { version = "0.3.2", default-features = false, features = ["std", "CGImage"] }
 objc2-user-notifications = { version = "0.3.2", default-features = false, features = [
     "std",
     "block2",
     "UNNotification",
     "UNNotificationContent",
     "UNNotificationRequest",
+    "UNNotificationResponse",
     "UNNotificationSound",
     "UNNotificationTrigger",
     "UNUserNotificationCenter",

@@ -1,6 +1,6 @@
 //! Платформенный код: единственный экземпляр, журнал событий ОС, реестр, учётные данные, стандартные потоки, разбивка
 //! памяти, буфер обмена (HTML); macOS — экземпляр через unix-сокет, Связка ключей, обработчик схемы адресов, поток
-//! ошибок в файл. `unsafe` — только здесь.
+//! ошибок в файл, буфер обмена (HTML), объект входа, управляемые настройки, память процесса. `unsafe` — только здесь.
 
 #[cfg(windows)]
 mod windows;
@@ -31,11 +31,22 @@ pub mod registry;
 pub mod volume;
 
 #[cfg(target_os = "macos")]
+#[path = "clipboard_macos.rs"]
+pub(crate) mod clipboard;
+#[cfg(target_os = "macos")]
 #[path = "console_macos.rs"]
 pub mod console;
 #[cfg(target_os = "macos")]
 #[path = "credentials_macos.rs"]
 pub mod credentials;
+#[cfg(target_os = "macos")]
+pub mod login_item;
+#[cfg(target_os = "macos")]
+#[path = "managed_macos.rs"]
+pub mod managed;
+#[cfg(target_os = "macos")]
+#[path = "memory_macos.rs"]
+pub mod memory;
 #[cfg(target_os = "macos")]
 pub mod url_scheme;
 
