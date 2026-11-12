@@ -323,7 +323,16 @@ fn main() {
     });
 }
 
+/// Вне Windows снимка нет: пример только для Windows-платформы gpui (собирается везде — clippy рабочей области).
+#[cfg(not(windows))]
+mod shoot {
+    pub fn shoot(_hwnd: isize) -> Result<image::RgbaImage, String> {
+        Err("image_check runs only on Windows".to_owned())
+    }
+}
+
 /// `PrintWindow(PW_RENDERFULLCONTENT)` клиентской области (с выключенной DirectComposition снимает DirectX).
+#[cfg(windows)]
 mod shoot {
     use std::ffi::c_void;
 
