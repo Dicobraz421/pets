@@ -60,13 +60,23 @@ pub(crate) fn open_locked(path: &Path) -> std::io::Result<Payload> {
 /// Ссылка вместо файла — ошибка.
 #[cfg(not(windows))]
 pub(crate) fn open_locked(path: &Path) -> std::io::Result<Payload> {
-    if fs::symlink_metadata(path)?.file_type().is_symlink() {
+    use std::os::unix::fs::MetadataExt;
+    let link = fs::symlink_metadata(path)?;
+    if link.file_type().is_symlink() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             "downloaded file is a link",
         ));
     }
     let file = OpenOptions::new().read(true).open(path)?;
+    // Между проверкой и открытием путь могли заменить ссылкой: открытый файл — тот же обычный файл (том и inode).
+    let opened = file.metadata()?;
+    if !opened.is_file() || opened.dev() != link.dev() || opened.ino() != link.ino() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "downloaded file changed while opening",
+        ));
+    }
     let mut bytes = Vec::new();
     file.take(MAX_PAYLOAD + 1).read_to_end(&mut bytes)?;
     if bytes.len() as u64 > MAX_PAYLOAD {
