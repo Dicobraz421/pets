@@ -247,6 +247,8 @@ pub fn load_dir(dir: &Path, app: &[AppRole]) -> (Vec<ThemeSpec>, Vec<ThemeError>
 /// Название темы для списка: свои — из файла (`name`, иначе id), встроенные — через Fluent.
 pub fn title(id: &str, state: &ThemeState) -> SharedString {
     let text = match id {
+        // «Как в macOS» (Postman MAC-04): система своя на каждой ОС.
+        SYSTEM if cfg!(target_os = "macos") => tr!("pets-ui-theme-system-mac"),
         SYSTEM => tr!("pets-ui-theme-system"),
         FLUENT_LIGHT => tr!("pets-ui-theme-fluent-light"),
         FLUENT_DARK => tr!("pets-ui-theme-fluent-dark"),
