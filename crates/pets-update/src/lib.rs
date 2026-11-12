@@ -28,7 +28,7 @@ pub use semver::Version;
 pub use error::{SignatureError, UpdateError};
 pub use install::{HELPER_FLAG, InstallPlan, UpdateResult, run_helper, take_result};
 pub use policy::{ALLOW_UPDATE, POLICY_KEY, Policy};
-pub use product::{ARCH, Channel, InstallKind, OS, Product, Settings};
+pub use product::{ARCH, Channel, InstallKind, OS, Product, Settings, app_bundle};
 pub use release::{SIGNATURE_EXT, Update, releases_url, select};
 pub use transport::{Response, Transport, USER_AGENT, UreqTransport};
 pub use updater::{

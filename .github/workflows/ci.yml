@@ -85,8 +85,33 @@ jobs:
       - name: Тесты наших правок
         run: cargo test --manifest-path crates/pets-gpui-windows/Cargo.toml --lib --features test-support -- vsync force_warp lazy_path image_sprite background pets_
 
+  # macOS (Postman MAC-06): mac-код pets — clippy рабочей области под aarch64-apple-darwin и тесты крейтов с
+  # кодом macOS. Apple Silicon, macOS 13+ (как у Postman).
+  macos:
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
+    name: macos-26
+    runs-on: macos-26
+    timeout-minutes: 40
+    env:
+      MACOSX_DEPLOYMENT_TARGET: '13.0'
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: aarch64-apple-darwin
+      - uses: Swatinem/rust-cache@v2.9.3
+        with:
+          shared-key: macos
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --target aarch64-apple-darwin -- -D warnings
+      - name: Тесты
+        run: cargo test --target aarch64-apple-darwin -p pets-shell -p pets-gpui-macos -p pets-ui -p pets-update
+
   gate:
-    needs: [changes, test, gpui-windows]
+    needs: [changes, test, gpui-windows, macos]
     if: always()
     runs-on: ubuntu-latest
     steps:

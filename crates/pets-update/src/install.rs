@@ -7,6 +7,7 @@
 //! 1. ждёт выхода программы (конец потока stdin, который держала программа);
 //! 2. заново проверяет подпись и держит файл закрытым от записи до конца установки;
 //! 3. MSI — `msiexec /i <файл> /passive /norestart`; portable — распаковка и замена файлов рядом с exe с откатом;
+//!    бандл macOS — распаковка рядом и замена `.app` целиком с откатом;
 //! 4. пишет итог (`result.json`), убирает скачанное и запускает программу снова.
 //!
 //! При следующем старте продукт читает итог через [`take_result`].
@@ -21,7 +22,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::io_err;
 use crate::updater::Verified;
-use crate::{InstallKind, Product, UpdateError, Updater, verify};
+use crate::{InstallKind, Product, UpdateError, Updater, app_bundle, verify};
 
 /// Первый аргумент командной строки помощника; второй — путь к файлу задания.
 pub const HELPER_FLAG: &str = "--pets-update-apply";
@@ -90,13 +91,24 @@ impl Updater {
     /// его выхода, ставит обновление и запускает программу снова. Ничего не ставится, пока программа работает.
     pub fn install(&self, verified: Verified, plan: InstallPlan) -> Result<(), UpdateError> {
         let downloaded = &verified.downloaded;
-        if downloaded.update.kind == InstallKind::Portable {
-            // Проверка до закрытия программы: в папку без права записи обновление не поставить.
-            let app_dir = plan
-                .app_exe
-                .parent()
-                .ok_or(UpdateError::Invalid("app exe has no folder"))?;
-            let probe = app_dir.join(".pets-update-probe");
+        // Проверка до закрытия программы: в папку без права записи обновление не поставить. Бандл заменяется
+        // переименованием — нужна запись в папку, где он лежит (`/Applications`).
+        let writable = match downloaded.update.kind {
+            InstallKind::Msi => None,
+            InstallKind::Portable => Some(
+                plan.app_exe
+                    .parent()
+                    .ok_or(UpdateError::Invalid("app exe has no folder"))?
+                    .to_path_buf(),
+            ),
+            InstallKind::AppBundle => Some(
+                app_bundle(&plan.app_exe)
+                    .and_then(|b| b.parent().map(Path::to_path_buf))
+                    .ok_or(UpdateError::Invalid("program is not in an .app bundle"))?,
+            ),
+        };
+        if let Some(dir) = writable {
+            let probe = dir.join(".pets-update-probe");
             File::create(&probe).map_err(io_err("write to program folder"))?;
             let _ = fs::remove_file(&probe);
         }
@@ -144,7 +156,7 @@ impl Updater {
 
 /// Имя копии exe, работающей помощником.
 fn helper_name(product: &Product) -> String {
-    format!("{}-update-helper.exe", product.asset_prefix)
+    format!("{}-update-helper{}", product.asset_prefix, std::env::consts::EXE_SUFFIX)
 }
 
 /// Режим помощника. Продукт зовёт первой строкой `main`: `Some(код)` — это был запуск помощника, нужно
@@ -181,10 +193,26 @@ pub fn run_helper(product: &Product) -> Option<i32> {
     let _ = fs::remove_file(&job.signature);
     let _ = fs::remove_file(&job_path);
     // Программа запускается и после неудачи: старая версия на месте, итог она покажет сама.
-    if let Err(e) = Command::new(&job.app_exe).args(&job.restart_args).spawn() {
+    if let Err(e) = restart(&job) {
         tracing::error!(error = %e, "update: program is not restarted");
     }
     Some(i32::from(outcome.is_err()))
+}
+
+/// Запустить программу снова. Бандл macOS — через `open`: Launch Services узнаёт новую версию бандла (значок, Dock).
+fn restart(job: &Job) -> std::io::Result<std::process::Child> {
+    if job.kind == InstallKind::AppBundle
+        && cfg!(target_os = "macos")
+        && let Some(bundle) = app_bundle(&job.app_exe)
+    {
+        let mut open = Command::new("/usr/bin/open");
+        open.arg(bundle);
+        if !job.restart_args.is_empty() {
+            open.arg("--args").args(&job.restart_args);
+        }
+        return open.spawn();
+    }
+    Command::new(&job.app_exe).args(&job.restart_args).spawn()
 }
 
 /// Прочитать и убрать итог последней установки и копию exe-помощника. Продукт зовёт при старте.
@@ -212,6 +240,14 @@ fn apply(keys: &[&str], job: &Job, msi: &mut dyn FnMut(&Path) -> Result<i32, Upd
                 .parent()
                 .ok_or(UpdateError::Invalid("app exe has no folder"))?;
             apply_portable(&lock, app_dir, &job.keep, RENAME_ATTEMPTS)
+        }
+        InstallKind::AppBundle => {
+            let bundle = app_bundle(&job.app_exe).ok_or(UpdateError::Invalid("program is not in an .app bundle"))?;
+            let exe = job
+                .app_exe
+                .file_name()
+                .ok_or(UpdateError::Invalid("app exe has no name"))?;
+            apply_bundle(&lock, &bundle, Path::new(exe), RENAME_ATTEMPTS)
         }
     }
 }
@@ -279,7 +315,67 @@ fn apply_portable(archive: &File, app_dir: &Path, keep: &[String], attempts: u32
     swapped
 }
 
-/// Распаковать архив в `staging`; вернуть относительные пути файлов. Путь, выходящий из папки, — ошибка.
+/// Заменить бандл `.app` целиком новым из архива. Архив распаковывается рядом с бандлом (тот же том — замена
+/// переименованием); в нём ровно один `*.app` верхнего уровня с `Contents/MacOS/<exe>`, прочее (`README.txt`)
+/// не ставится. Старый бандл уходит в запас и возвращается, если новый не встал; после успеха запас удаляется.
+fn apply_bundle(archive: &File, bundle: &Path, exe: &Path, attempts: u32) -> Result<(), UpdateError> {
+    let parent = bundle
+        .parent()
+        .ok_or(UpdateError::Invalid("app bundle has no folder"))?;
+    let name = bundle
+        .file_name()
+        .ok_or(UpdateError::Invalid("app bundle has no name"))?
+        .to_string_lossy();
+    let staging = parent.join(format!("{STAGING_DIR}-{name}"));
+    let backup = parent.join(format!("{BACKUP_DIR}-{name}"));
+    // Прошлая установка оборвалась между переименованиями: бандла нет, есть запас — вернуть его.
+    if !bundle.exists() && backup.exists() {
+        fs::rename(&backup, bundle).map_err(io_err("restore previous app bundle"))?;
+    }
+    for dir in [&staging, &backup] {
+        if dir.exists() {
+            fs::remove_dir_all(dir).map_err(io_err("clean previous update"))?;
+        }
+    }
+    let placed = extract(archive, &staging).and_then(|_| {
+        let new = new_bundle(&staging, exe)?;
+        rename_retry(bundle, &backup, attempts).map_err(io_err("move old app bundle"))?;
+        if let Err(e) = rename_retry(&new, bundle, attempts) {
+            tracing::warn!("update: app bundle replace failed, rolling back");
+            let _ = fs::rename(&backup, bundle);
+            return Err(io_err("place new app bundle")(e));
+        }
+        Ok(())
+    });
+    let _ = fs::remove_dir_all(&staging);
+    let _ = fs::remove_dir_all(&backup);
+    placed
+}
+
+/// Единственный `*.app` верхнего уровня распакованного архива, с программой `Contents/MacOS/<exe>`.
+fn new_bundle(staging: &Path, exe: &Path) -> Result<PathBuf, UpdateError> {
+    let mut apps = fs::read_dir(staging)
+        .map_err(io_err("read unpacked archive"))?
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| p.is_dir() && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("app")));
+    let (Some(app), None) = (apps.next(), apps.next()) else {
+        return Err(UpdateError::Archive(
+            "archive must hold exactly one .app bundle".to_owned(),
+        ));
+    };
+    if !app.join("Contents").join("MacOS").join(exe).is_file() {
+        return Err(UpdateError::Archive(format!(
+            "no Contents/MacOS/{} in the .app bundle",
+            exe.display()
+        )));
+    }
+    Ok(app)
+}
+
+/// Распаковать архив в `staging`; вернуть относительные пути файлов и ссылок. Путь, выходящий из папки, — ошибка.
+/// Unix: права файлов (бит запуска) — из архива; символьная ссылка — только внутрь распаковки. `__MACOSX/` (ресурсы
+/// и расширенные атрибуты, их кладёт `ditto --sequesterRsrc`) пропускается.
 fn extract(archive: &File, staging: &Path) -> Result<Vec<PathBuf>, UpdateError> {
     let bad = |e: zip::result::ZipError| UpdateError::Archive(e.to_string());
     let mut zip = zip::ZipArchive::new(archive).map_err(bad)?;
@@ -290,17 +386,66 @@ fn extract(archive: &File, staging: &Path) -> Result<Vec<PathBuf>, UpdateError> 
             .enclosed_name()
             .filter(|p| p.components().all(|c| matches!(c, Component::Normal(_))))
             .ok_or_else(|| UpdateError::Archive(format!("unsafe path in archive, entry {i}")))?;
+        if rel.starts_with("__MACOSX") {
+            continue;
+        }
         let out = staging.join(&rel);
         if entry.is_dir() {
             fs::create_dir_all(&out).map_err(io_err("unpack archive"))?;
             continue;
         }
         make_parent(&out)?;
+        if entry.is_symlink() {
+            let mut target = String::new();
+            entry.read_to_string(&mut target).map_err(io_err("unpack archive"))?;
+            symlink(&rel, Path::new(&target), &out)?;
+            files.push(rel);
+            continue;
+        }
         let mut file = File::create(&out).map_err(io_err("unpack archive"))?;
         std::io::copy(&mut entry, &mut file).map_err(io_err("unpack archive"))?;
+        #[cfg(unix)]
+        if let Some(mode) = entry.unix_mode() {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(fs::Permissions::from_mode(mode & 0o777))
+                .map_err(io_err("unpack archive"))?;
+        }
         files.push(rel);
     }
     Ok(files)
+}
+
+/// Ссылка `rel` → `target` (относительно папки ссылки) остаётся внутри распаковки.
+fn link_inside(rel: &Path, target: &Path) -> bool {
+    let mut depth = rel.components().count().saturating_sub(1);
+    for c in target.components() {
+        match c {
+            Component::Normal(_) => depth += 1,
+            Component::CurDir => {}
+            Component::ParentDir if depth > 0 => depth -= 1,
+            _ => return false,
+        }
+    }
+    true
+}
+
+/// Символьная ссылка из архива (фреймворки в бандле `.app`). Вне Unix ссылок в архивах обновления нет.
+fn symlink(rel: &Path, target: &Path, out: &Path) -> Result<(), UpdateError> {
+    if !link_inside(rel, target) {
+        return Err(UpdateError::Archive(format!(
+            "link {} points outside the archive",
+            rel.display()
+        )));
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, out).map_err(io_err("unpack archive"))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = out;
+        Err(UpdateError::Archive(format!("link {} in archive", rel.display())))
+    }
 }
 
 fn make_parent(path: &Path) -> Result<(), UpdateError> {

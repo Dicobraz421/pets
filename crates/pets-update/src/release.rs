@@ -17,7 +17,7 @@ pub struct Update {
     pub kind: InstallKind,
     /// Страница выпуска — для ссылки «Что нового».
     pub page_url: String,
-    /// Имя артефакта: `<prefix>-<версия>-windows-<arch>.<msi|zip>`.
+    /// Имя артефакта: `<prefix>-<версия>-<os>-<arch>.<msi|zip>`.
     pub asset_name: String,
     /// Адрес артефакта.
     pub asset_url: String,

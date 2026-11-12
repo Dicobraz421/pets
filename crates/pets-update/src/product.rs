@@ -1,12 +1,18 @@
 //! Описание продукта, канал, настройки пользователя, вид установки.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use semver::Version;
 use serde::{Deserialize, Serialize};
 
-/// ОС в имени артефакта.
-pub const OS: &str = "windows";
+/// ОС в имени артефакта: `windows`, `macos` или `linux`.
+pub const OS: &str = if cfg!(target_os = "macos") {
+    "macos"
+} else if cfg!(target_os = "linux") {
+    "linux"
+} else {
+    "windows"
+};
 
 /// Архитектура в имени артефакта: `x64` или `arm64`.
 pub const ARCH: &str = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
@@ -18,7 +24,8 @@ pub struct Product {
     pub name: &'static str,
     /// Репозиторий выпусков на GitHub: `владелец/имя`.
     pub repo: &'static str,
-    /// Начало имён артефактов (нижний регистр): `urfin` → `urfin-<версия>-windows-x64.msi`.
+    /// Начало имён артефактов (нижний регистр): `urfin` → `urfin-<версия>-windows-x64.msi`,
+    /// `postman` → `postman-<версия>-macos-arm64.zip`.
     pub asset_prefix: &'static str,
     /// Версия запущенной программы.
     pub current: Version,
@@ -64,6 +71,9 @@ pub enum InstallKind {
     Msi,
     /// Portable: скачивается `.zip`, файлы заменяются рядом с exe.
     Portable,
+    /// macOS: программа — бандл `<Имя>.app` ([`app_bundle`]); скачивается `.zip` с ним (`ditto`, рядом может лежать
+    /// `README.txt`), бандл заменяется целиком с откатом.
+    AppBundle,
 }
 
 impl InstallKind {
@@ -80,13 +90,22 @@ impl InstallKind {
     pub fn extension(self) -> &'static str {
         match self {
             InstallKind::Msi => "msi",
-            InstallKind::Portable => "zip",
+            InstallKind::Portable | InstallKind::AppBundle => "zip",
         }
     }
 }
 
+/// Бандл `.app`, в котором лежит exe: `…/Имя.app/Contents/MacOS/<exe>` → `…/Имя.app`. Не в бандле — `None`.
+pub fn app_bundle(exe: &Path) -> Option<PathBuf> {
+    let macos = exe.parent()?;
+    let contents = macos.parent()?;
+    let bundle = contents.parent()?;
+    let is_app = bundle.extension().is_some_and(|e| e.eq_ignore_ascii_case("app"));
+    (macos.file_name()? == "MacOS" && contents.file_name()? == "Contents" && is_app).then(|| bundle.to_path_buf())
+}
+
 impl Product {
-    /// Имя артефакта выпуска: `<prefix>-<версия>-windows-<arch>.<msi|zip>`.
+    /// Имя артефакта выпуска: `<prefix>-<версия>-<os>-<arch>.<msi|zip>` ([`OS`], [`ARCH`]).
     pub fn asset_name(&self, version: &Version, kind: InstallKind) -> String {
         format!("{}-{version}-{OS}-{ARCH}.{}", self.asset_prefix, kind.extension())
     }
