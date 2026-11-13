@@ -16,9 +16,12 @@
 //! тогда, когда окно осталось грязным или ждут колбэки следующего кадра. Это и есть «спрос».
 
 pub(crate) use crate::frames_logic::{FrameCause, Ring, Stall, StallTracker, WindowFlags};
+use block2::RcBlock;
+use objc2::{msg_send, runtime::AnyObject};
 use std::{
     collections::HashMap,
     fmt,
+    ptr::NonNull,
     sync::{
         Arc, Mutex, OnceLock, PoisonError, Weak,
         atomic::{AtomicBool, AtomicU8, AtomicU32, AtomicU64, Ordering::Relaxed},
@@ -215,7 +218,29 @@ pub(crate) struct WindowDiag {
     /// Колбэки CVDisplayLink на его потоке (по ним видно слияние тиков до `step`).
     pub cv_ticks: Arc<AtomicU64>,
     cv_ticks_seen: AtomicU64,
+    /// Drawable от Metal-ссылки: выдано, показано (`presentedHandler`, время > 0), отброшено
+    /// (`presentedHandler` с нулевым временем), возвращено неиспользованным.
+    drawables_issued: AtomicU64,
+    drawables_presented: AtomicU64,
+    drawables_discarded: AtomicU64,
+    drawables_unused: AtomicU64,
+    /// Последний `presentedHandler`: наше время и `presentedTime` (биты f64, с).
+    last_presented: AtomicU64,
+    last_presented_media: AtomicU64,
+    /// Слой: `maximumDrawableCount`, `displaySyncEnabled`, `presentsWithTransaction`,
+    /// `allowsNextDrawableTimeout` (биты: 1, 2, 4; 0 — не прочитан).
+    layer_max_drawables: AtomicU32,
+    layer_flags: AtomicU8,
+    /// Последние колбэки Metal-ссылки (кольцо, для частоты перед паузой).
+    callbacks: [AtomicU64; CALLBACK_HISTORY],
+    callback_next: AtomicU32,
+    /// Пауза, о которой написал сторож (начало спроса), и первый кадр после неё.
+    stalled_since: AtomicU64,
+    stall_end: AtomicU64,
+    stall_end_cause: AtomicU8,
 }
+
+const CALLBACK_HISTORY: usize = 8;
 
 impl WindowDiag {
     /// `None`, если диагностика выключена.
@@ -244,6 +269,19 @@ impl WindowDiag {
             screen_fps: AtomicU32::new(0),
             cv_ticks: Arc::new(AtomicU64::new(0)),
             cv_ticks_seen: AtomicU64::new(0),
+            drawables_issued: AtomicU64::new(0),
+            drawables_presented: AtomicU64::new(0),
+            drawables_discarded: AtomicU64::new(0),
+            drawables_unused: AtomicU64::new(0),
+            last_presented: AtomicU64::new(NONE),
+            last_presented_media: AtomicU64::new(0),
+            layer_max_drawables: AtomicU32::new(0),
+            layer_flags: AtomicU8::new(0),
+            callbacks: std::array::from_fn(|_| AtomicU64::new(NONE)),
+            callback_next: AtomicU32::new(0),
+            stalled_since: AtomicU64::new(NONE),
+            stall_end: AtomicU64::new(NONE),
+            stall_end_cause: AtomicU8::new(0),
         });
         let mut windows = WINDOWS.lock().unwrap_or_else(PoisonError::into_inner);
         windows.retain(|w| w.strong_count() > 0);
@@ -329,6 +367,204 @@ impl WindowDiag {
         self.last_cause.store(cause as u8, Relaxed);
         self.last_frame.store(now, Relaxed);
         self.demand_since.store(NONE, Relaxed);
+        // Первый кадр после паузы, о которой написал сторож, — её конец.
+        if self.stalled_since.swap(NONE, Relaxed) != NONE {
+            self.stall_end_cause.store(cause as u8, Relaxed);
+            self.stall_end.store(now, Relaxed);
+        }
+    }
+
+    /// Сторож написал `frame stall` по спросу с `since`; конец паузы отметит первый кадр.
+    fn mark_stalled(&self, since: u64) {
+        self.stalled_since.store(since, Relaxed);
+        // Кадр мог прийти между проверкой сторожа и этой отметкой.
+        if let Some((at, cause)) = self.last_frame()
+            && at >= since
+            && self.stalled_since.swap(NONE, Relaxed) != NONE
+        {
+            self.stall_end_cause.store(cause as u8, Relaxed);
+            self.stall_end.store(at, Relaxed);
+        }
+    }
+
+    fn stall_end(&self) -> Option<(u64, FrameCause)> {
+        let at = self.stall_end.load(Relaxed);
+        let cause = FrameCause::from_u8(self.stall_end_cause.load(Relaxed))?;
+        (at != NONE).then_some((at, cause))
+    }
+
+    /// Колбэк Metal-ссылки: интервал с прошлого, до показа по плану ссылки, drawable в работе.
+    pub fn metal_callback(&self, target_presentation: f64) {
+        let now = now_ms();
+        let slot = self.callback_next.fetch_add(1, Relaxed) as usize;
+        let previous =
+            self.callbacks[(slot + CALLBACK_HISTORY - 1) % CALLBACK_HISTORY].load(Relaxed);
+        self.callbacks[slot % CALLBACK_HISTORY].store(now, Relaxed);
+        let interval = if previous == NONE || slot == 0 {
+            String::from("-")
+        } else {
+            now.saturating_sub(previous).to_string()
+        };
+        frames_event!(
+            Trace,
+            self.id,
+            "metal link callback: interval={interval}ms target_present_in={:.1}ms drawables_in_flight={}",
+            (target_presentation - media_time()) * 1000.0,
+            self.drawables_in_flight()
+        );
+    }
+
+    /// Ссылка выдала drawable: считаем и вешаем `presentedHandler`.
+    pub fn drawable_issued(self: &Arc<Self>, drawable: &AnyObject) {
+        self.drawables_issued.fetch_add(1, Relaxed);
+        // SAFETY: `drawable` — CAMetalDrawable (MTLDrawable): `drawableID` и
+        // `addPresentedHandler:` (macOS 10.15.4+) есть у протокола; блок копируется Metal.
+        let id: usize = unsafe { msg_send![drawable, drawableID] };
+        let diag = Arc::clone(self);
+        let handler = RcBlock::new(move |presented: NonNull<AnyObject>| {
+            // SAFETY: Metal передаёт показанный drawable.
+            let time: f64 = unsafe { msg_send![presented.as_ref(), presentedTime] };
+            diag.drawable_presented(id, time);
+        });
+        unsafe {
+            let _: () = msg_send![drawable, addPresentedHandler: &*handler];
+        }
+        frames_event!(
+            Trace,
+            self.id,
+            "drawable #{id} issued: drawables_in_flight={}",
+            self.drawables_in_flight()
+        );
+    }
+
+    /// Кадр не взял выданный drawable — он вернулся слою без показа.
+    pub fn drawable_unused(&self) {
+        self.drawables_unused.fetch_add(1, Relaxed);
+    }
+
+    fn drawable_presented(&self, id: usize, time: f64) {
+        if time > 0.0 {
+            self.drawables_presented.fetch_add(1, Relaxed);
+            self.last_presented.store(now_ms(), Relaxed);
+            self.last_presented_media.store(time.to_bits(), Relaxed);
+            frames_event!(
+                Trace,
+                self.id,
+                "drawable #{id} presented: {:.1}ms ago drawables_in_flight={}",
+                (media_time() - time) * 1000.0,
+                self.drawables_in_flight()
+            );
+        } else {
+            self.drawables_discarded.fetch_add(1, Relaxed);
+            frames_event!(
+                Debug,
+                self.id,
+                "drawable #{id} presentedHandler with presentedTime=0 (not shown) drawables_in_flight={}",
+                self.drawables_in_flight()
+            );
+        }
+    }
+
+    /// Выдано минус показано, отброшено и возвращено неиспользованным.
+    fn drawables_in_flight(&self) -> u64 {
+        self.drawables_issued.load(Relaxed).saturating_sub(
+            self.drawables_presented.load(Relaxed)
+                + self.drawables_discarded.load(Relaxed)
+                + self.drawables_unused.load(Relaxed),
+        )
+    }
+
+    fn drawables_summary(&self) -> String {
+        let last = self.last_presented.load(Relaxed);
+        format!(
+            "drawables_in_flight={} (issued={} presented={} presentedTime=0:{} unused={}) last_presentedHandler={}",
+            self.drawables_in_flight(),
+            self.drawables_issued.load(Relaxed),
+            self.drawables_presented.load(Relaxed),
+            self.drawables_discarded.load(Relaxed),
+            self.drawables_unused.load(Relaxed),
+            if last == NONE {
+                String::from("none")
+            } else {
+                format!(
+                    "t{last}ms ({}ms ago, presentedTime={:.3}s)",
+                    now_ms().saturating_sub(last),
+                    f64::from_bits(self.last_presented_media.load(Relaxed))
+                )
+            }
+        )
+    }
+
+    /// Слой окна (при запуске ссылки и для снимка).
+    pub fn set_layer(
+        &self,
+        max_drawables: u32,
+        display_sync: bool,
+        presents_with_transaction: bool,
+        allows_timeout: bool,
+    ) {
+        let flags = 8
+            | display_sync as u8
+            | (presents_with_transaction as u8) << 1
+            | (allows_timeout as u8) << 2;
+        let changed = self.layer_max_drawables.swap(max_drawables, Relaxed) != max_drawables
+            || self.layer_flags.swap(flags, Relaxed) != flags;
+        if changed {
+            frames_event!(Debug, self.id, "layer: {}", self.layer_summary());
+        }
+    }
+
+    fn layer_summary(&self) -> String {
+        let flags = self.layer_flags.load(Relaxed);
+        if flags == 0 {
+            return String::from("not read yet");
+        }
+        format!(
+            "maximumDrawableCount={} displaySyncEnabled={} presentsWithTransaction={} allowsNextDrawableTimeout={}",
+            self.layer_max_drawables.load(Relaxed),
+            flags & 1,
+            flags >> 1 & 1,
+            flags >> 2 & 1
+        )
+    }
+
+    fn callback_intervals(&self) -> String {
+        let next = self.callback_next.load(Relaxed) as usize;
+        let count = next.min(CALLBACK_HISTORY);
+        let times: Vec<u64> = (next - count..next)
+            .map(|slot| self.callbacks[slot % CALLBACK_HISTORY].load(Relaxed))
+            .collect();
+        let intervals: Vec<String> = times
+            .windows(2)
+            .map(|pair| pair[1].saturating_sub(pair[0]).to_string())
+            .collect();
+        format!(
+            "last metal callbacks: t{}ms, intervals [{}] ms",
+            times.last().map_or(String::from("-"), u64::to_string),
+            intervals.join(", ")
+        )
+    }
+
+    /// `PlatformWindow::draw` без drawable от ссылки — через `nextDrawable` слоя (внутри
+    /// gpui_apple): сколько занял вызов. nil gpui_apple пишет сам: «failed to retrieve next drawable».
+    pub fn next_drawable_draw(&self, took: Duration) {
+        let ms = took.as_secs_f64() * 1000.0;
+        let level = if ms >= 20.0 {
+            log::Level::Debug
+        } else {
+            log::Level::Trace
+        };
+        event(
+            level,
+            self.id,
+            format_args!("draw via nextDrawable: {ms:.1}ms (nextDrawable wait + encode)"),
+        );
+    }
+
+    /// Рисует ли окно в drawable от Metal-ссылки (иначе — `nextDrawable`).
+    pub fn draws_from_link(&self) -> bool {
+        self.path == FramePath::Metal
+            && LinkState::from_u8(self.link.load(Relaxed)) != LinkState::Detached
     }
 
     /// gpui нарисовал сцену.
@@ -406,6 +642,8 @@ fn start_watchdog() {
 
 fn watchdog() {
     let mut trackers: HashMap<u32, StallTracker> = HashMap::new();
+    // Счётчики drawable на начало паузы: (выдано, показано).
+    let mut at_stall: HashMap<u32, (u64, u64)> = HashMap::new();
     let mut power = None;
     loop {
         std::thread::sleep(WATCHDOG_PERIOD);
@@ -436,12 +674,20 @@ fn watchdog() {
             let change = tracker.tick(
                 now,
                 window.demand_since(),
-                window.last_frame(),
+                window.stall_end(),
                 window.last_resume(),
                 STALL_THRESHOLD_MS,
             );
             match change {
                 Some(Stall::Began { waited_ms }) => {
+                    window.mark_stalled(now.saturating_sub(waited_ms));
+                    at_stall.insert(
+                        window.id,
+                        (
+                            window.drawables_issued.load(Relaxed),
+                            window.drawables_presented.load(Relaxed),
+                        ),
+                    );
                     log::warn!(target: TARGET, "{}", stall_snapshot(&window, now, waited_ms, current));
                 }
                 Some(Stall::Ended {
@@ -452,11 +698,16 @@ fn watchdog() {
                     let resumed = resumed_after_ms
                         .map(|ms| format!("; link resumed/started at +{ms} ms"))
                         .unwrap_or_default();
+                    let (issued, presented) = at_stall.remove(&window.id).unwrap_or_default();
                     log::warn!(
                         target: TARGET,
-                        "t={now}ms w{} frame stall ended after {after_ms} ms: {}{resumed}",
+                        "t={now}ms w{} frame stall ended after {after_ms} ms: first frame by {}{resumed}; \
+                         during stall: drawables issued={} presented={}; now {}",
                         window.id,
-                        cause.name()
+                        cause.name(),
+                        window.drawables_issued.load(Relaxed).saturating_sub(issued),
+                        window.drawables_presented.load(Relaxed).saturating_sub(presented),
+                        window.drawables_summary()
                     );
                     RING.lock().unwrap_or_else(PoisonError::into_inner).push(
                         now,
@@ -494,6 +745,13 @@ fn stall_snapshot(window: &WindowDiag, now: u64, waited_ms: u64, power: (&str, b
         }
         None => s.push_str(" last_frame=none"),
     }
+    let _ = write!(
+        s,
+        "\n  drawables: {}\n  layer: {}\n  {}",
+        window.drawables_summary(),
+        window.layer_summary(),
+        window.callback_intervals()
+    );
     match WindowFlags::unpack(window.flags.load(Relaxed)) {
         Some(flags) => {
             let _ = write!(
@@ -531,6 +789,16 @@ fn stall_snapshot(window: &WindowDiag, now: u64, waited_ms: u64, power: (&str, b
         let _ = write!(s, "\n    {entry}");
     }
     s
+}
+
+/// `CACurrentMediaTime` — часы `presentedTime` и меток Metal-ссылки, с.
+pub(crate) fn media_time() -> f64 {
+    #[link(name = "QuartzCore", kind = "framework")]
+    unsafe extern "C" {
+        fn CACurrentMediaTime() -> f64;
+    }
+    // SAFETY: без аргументов и состояния.
+    unsafe { CACurrentMediaTime() }
 }
 
 /// `thermalState` и `isLowPowerModeEnabled` (NSProcessInfo потокобезопасен).

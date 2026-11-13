@@ -34,6 +34,11 @@ gpui-pre-macos = { git = "https://github.com/Dicobraz/pets", rev = "<комми�
   кадр пришёл — WARN `frame stall ended after N ms` и чем закончилось (`displayLayer:`, колбэк, пробуждение).
   Только пишет, ничего не чинит. «Грязное окно / `on_next_frame`» платформе не видно: спрос — это вызовы
   `schedule_frame` и waker'а, которые gpui делает ровно при этих условиях.
+- Drawable Metal-ссылки: `presentedHandler` каждого (время показа, в работе = выдано − показано − отброшено −
+  возвращено неиспользованным), `maximumDrawableCount`, `displaySyncEnabled`, `presentsWithTransaction`,
+  `allowsNextDrawableTimeout` слоя; кадры без drawable ссылки — время `draw` через `nextDrawable` (nil пишет сам
+  gpui_apple: «failed to retrieve next drawable»); интервалы последних колбэков ссылки. Всё это — и в снимке сторожа;
+  длительность паузы — до первого кадра после неё. `preferredFrameRateRange` не виден: ссылка закрыта в gpui_apple.
 - При первом окне — INFO: версия macOS, `hw.model`, экраны с частотой, выбранный путь кадров.
 
 Прогон с Metal-путём: `GPUI_METAL_DISPLAY_LINK=1 GPUI_FRAMES_WATCHDOG=1 POSTMAN_LOG=info,gpui_macos::frames=trace`.

@@ -886,6 +886,7 @@ impl MacWindowState {
                     self.renderer.set_display_link_attached(true);
                 }
                 if let Some(diag) = &diag {
+                    pets_frames_layer(diag, &self.renderer);
                     if started {
                         diag.set_link(LinkState::Running);
                         frames_event!(
@@ -923,6 +924,7 @@ impl MacWindowState {
                     .log_err()
                     .is_some();
                 if let Some(diag) = &diag {
+                    pets_frames_layer(diag, &self.renderer);
                     if started {
                         diag.set_link(LinkState::Running);
                     }
@@ -2251,7 +2253,16 @@ impl PlatformWindow for MacWindow {
             diag.drew();
         }
         let mut this = self.0.lock();
-        this.renderer.draw(scene);
+        match &self.3 {
+            // Pets patch: без drawable от ссылки рендерер ждёт `nextDrawable` — замер.
+            Some(diag) if !diag.draws_from_link() => {
+                pets_frames_layer(diag, &this.renderer);
+                let start = std::time::Instant::now();
+                this.renderer.draw(scene);
+                diag.next_drawable_draw(start.elapsed());
+            }
+            _ => this.renderer.draw(scene),
+        }
     }
 
     // GPUI calls this without waking the frame waker when a window only needs
@@ -3627,7 +3638,7 @@ fn metal_frame(
     let metal_frames = metal_frames.clone();
     // Pets patch: диагностика кадров — каждый колбэк ссылки.
     if let Some(diag) = &lock.diag {
-        frames_event!(Trace, diag.id, "metal link callback");
+        diag.metal_callback(update.targetPresentationTimestamp());
     }
     let Some(mut callback) = lock.request_frame_callback.take() else {
         if let Some(diag) = &lock.diag {
@@ -3639,7 +3650,12 @@ fn metal_frame(
         }
         return;
     };
-    lock.renderer.set_frame_drawable(Some(update.drawable()));
+    let drawable = update.drawable();
+    if let Some(diag) = &lock.diag {
+        // SAFETY: CAMetalDrawable — объект Objective-C.
+        diag.drawable_issued(unsafe { &*Retained::as_ptr(&drawable).cast::<AnyObject>() });
+    }
+    lock.renderer.set_frame_drawable(Some(drawable));
     drop(lock);
     metal_frames.begin_frame();
     callback(RequestFrameOptions {
@@ -3652,6 +3668,9 @@ fn metal_frame(
     // A frame with nothing to draw leaves its drawable unused; releasing it
     // lets the link hand it out again.
     let used_drawable = lock.renderer.set_frame_drawable(None).is_none();
+    if !used_drawable && let Some(diag) = &lock.diag {
+        diag.drawable_unused();
+    }
     metal_frames.end_frame(used_drawable);
 }
 
@@ -3685,6 +3704,27 @@ fn pets_frames_refresh(state: &MacWindowState) {
         )
     });
     diag.set_window(flags, display, fps);
+}
+
+/// Свойства слоя, от которых зависит выдача drawable.
+fn pets_frames_layer(diag: &WindowDiag, renderer: &renderer::Renderer) {
+    let Some(layer) = renderer.layer() else {
+        return;
+    };
+    // SAFETY: свойства CAMetalLayer (macOS 10.13+), только чтение.
+    let (max, sync, transaction, timeout) = unsafe {
+        let max: NSUInteger = msg_send![layer, maximumDrawableCount];
+        let sync: Bool = msg_send![layer, displaySyncEnabled];
+        let transaction: Bool = msg_send![layer, presentsWithTransaction];
+        let timeout: Bool = msg_send![layer, allowsNextDrawableTimeout];
+        (max, sync, transaction, timeout)
+    };
+    diag.set_layer(
+        max as u32,
+        sync.as_bool(),
+        transaction.as_bool(),
+        timeout.as_bool(),
+    );
 }
 
 fn pets_screen_ptr(screen: &NSScreen) -> *mut AnyObject {
