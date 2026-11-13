@@ -2,7 +2,7 @@
 
 Новое решение — сверху, с датой.
 
-## 2026-11-13. macOS: значок в строке меню (Postman MAC-08)
+## 2026-11-13. macOS: значок в строке меню (Postman MAC-09)
 
 Владелец (Postman #656, волна MAC — класс B, согласована): аналог значка в трее Windows — `NSStatusItem` в
 `NSStatusBar.systemStatusBar`. API добавлено, прежнее не менялось: `pets_gpui_macos::status_item::StatusItem::new(image,
