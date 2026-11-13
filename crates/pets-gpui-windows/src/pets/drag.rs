@@ -1,9 +1,13 @@
 //! Перетаскивание файлов из окна в другие приложения (OLE drag source): свои `IDataObject` и `IDropSource`,
 //! `DoDragDrop` с `DROPEFFECT_COPY`. Форматы:
-//! - `CFSTR_FILEDESCRIPTORW` + `CFSTR_FILECONTENTS` — виртуальные файлы: байты из памяти или ленивого источника, без
-//!   записи на диск (как у Outlook);
-//! - запасной `CF_HDROP` — копии на диске, если они есть у всех файлов. Каталог копий — [`TempCopies`]: имя задаёт
-//!   приложение, приложение же пишет файл (метка «из Интернета» и безопасное имя — его правила) и чистит каталог.
+//! - `CF_HDROP` — основной: копии на диске, если они есть у всех файлов. Перед перетаскиванием на каждую копию
+//!   пишется метка «из Интернета» (поток `Zone.Identifier`, `ZoneId=3`, [`mark_from_internet`]); не записалась —
+//!   перетаскивания нет (ошибка). Виртуальные форматы тогда не отдаются: получатель копирует файл вместе с меткой.
+//! - `CFSTR_FILEDESCRIPTORW` + `CFSTR_FILECONTENTS` — виртуальные файлы (байты из памяти или ленивого источника), только
+//!   когда копий нет: файл пишет получатель, метки на нём не будет — WARN в журнал.
+//!
+//! Каталог копий — [`TempCopies`]: имя задаёт приложение, приложение же пишет файл (безопасное имя — его правила) и
+//! чистит каталог.
 //!
 //! Что можно тащить — решает приложение: сюда приходит уже отобранное.
 //!
@@ -74,8 +78,8 @@ impl DragFile {
         }
     }
 
-    /// Копия файла на диске (обычно в [`TempCopies::slot`]): запасной `CF_HDROP` для получателей без виртуальных
-    /// файлов.
+    /// Копия файла на диске (обычно в [`TempCopies::slot`]): с ней файл уходит как `CF_HDROP` с меткой «из
+    /// Интернета», которую пишет [`drag_out`].
     pub fn with_copy(mut self, path: PathBuf) -> Self {
         self.copy = Some(path);
         self
@@ -122,7 +126,7 @@ pub fn drag_out(files: Vec<DragFile>) -> io::Result<Outcome> {
     if files.is_empty() {
         return Ok(Outcome::Cancelled);
     }
-    let data: IDataObject = FileData::new(files).into();
+    let data: IDataObject = prepare(files)?.into();
     let source: IDropSource = Source { first: Cell::new(true) }.into();
     let mut effect = DROPEFFECT_NONE;
     // SAFETY: оба объекта — наши COM-объекты, живут до конца вызова; `effect` — наша переменная. OLE в потоке окна
@@ -133,6 +137,36 @@ pub fn drag_out(files: Vec<DragFile>) -> io::Result<Outcome> {
         DRAGDROP_S_CANCEL => Ok(Outcome::Cancelled),
         e => Err(io::Error::other(format!("DoDragDrop: {}", e.message()))),
     }
+}
+
+/// Метка «из Интернета» (Mark of the Web) на файле: поток `<файл>:Zone.Identifier` с `ZoneId=3`, как пишут браузеры.
+/// Прежняя метка заменяется. Файла нет — `NotFound` (поток не создаёт пустой файл); том без потоков NTFS (FAT, сеть
+/// без ADS) — ошибка.
+pub fn mark_from_internet(path: &Path) -> io::Result<()> {
+    if !path.is_file() {
+        return Err(io::Error::new(io::ErrorKind::NotFound, "drag copy is missing"));
+    }
+    let mut stream = path.as_os_str().to_owned();
+    stream.push(":Zone.Identifier");
+    std::fs::write(PathBuf::from(stream), ZONE_INTERNET)
+}
+
+const ZONE_INTERNET: &[u8] = b"[ZoneTransfer]\r\nZoneId=3\r\n";
+
+/// Данные перетаскивания: копии есть у всех — метить их (ошибка — отказ), нет — виртуальные файлы без метки (WARN).
+fn prepare(files: Vec<DragFile>) -> io::Result<FileData> {
+    let data = FileData::new(files);
+    if data.has_copies() {
+        for path in data.files.iter().filter_map(|f| f.copy.as_deref()) {
+            mark_from_internet(path)?;
+        }
+    } else {
+        log::warn!(
+            "drag-out: {} file(s) offered as virtual files without Mark of the Web (no disk copies)",
+            data.files.len()
+        );
+    }
+    Ok(data)
 }
 
 /// Каталог копий для `CF_HDROP`: `%TEMP%\<app>\drag`, свой подкаталог на каждое перетаскивание — имена файлов разных
@@ -250,13 +284,13 @@ impl FileData {
         self.files.iter().all(|f| f.copy.is_some())
     }
 
-    /// Что отдаём: описание виртуальных файлов, их байты, запасной список файлов на диске.
+    /// Что отдаём: копии с меткой (`CF_HDROP`) или, без копий, описание виртуальных файлов и их байты.
     fn formats(&self) -> Vec<FORMATETC> {
+        if self.has_copies() {
+            return vec![format(CF_HDROP.0, -1)];
+        }
         let mut v = vec![format(self.descriptor, -1)];
         v.extend((0..self.files.len()).map(|i| format(self.contents, i as i32)));
-        if self.has_copies() {
-            v.push(format(CF_HDROP.0, -1));
-        }
         v
     }
 
@@ -272,11 +306,14 @@ impl FileData {
         if f.tymed & TYMED_HGLOBAL.0 as u32 == 0 || f.dwAspect != DVASPECT_CONTENT.0 || f.cfFormat == 0 {
             return false;
         }
+        if self.has_copies() {
+            // Виртуальный файл с копией обошёл бы метку: получатель записал бы байты сам.
+            return f.cfFormat == CF_HDROP.0;
+        }
         match f.cfFormat {
             d if d == self.descriptor => true,
             // QueryGetData спрашивает `FILECONTENTS` и с −1 («есть ли вообще»).
             c if c == self.contents => f.lindex == -1 || self.index(f.lindex).is_some(),
-            h if h == CF_HDROP.0 => self.has_copies(),
             _ => false,
         }
     }
@@ -490,37 +527,79 @@ mod tests {
     }
 
     #[test]
-    fn pets_drag_offers_virtual_file_and_hdrop() {
+    fn pets_drag_with_copy_offers_only_hdrop_and_bare_offers_virtual_file() {
         let (descriptor, contents) = virtual_formats();
         let obj: IDataObject =
             FileData::new(vec![pdf().with_copy(PathBuf::from(r"C:\Temp\App\drag\1\отчёт.pdf"))]).into();
-        assert!(ok(&obj, format(descriptor, -1)));
-        assert!(ok(&obj, format(contents, 0)));
-        assert!(ok(&obj, format(contents, -1)));
-        assert!(!ok(&obj, format(contents, 1)), "второго файла нет");
         assert!(ok(&obj, format(CF_HDROP.0, -1)));
+        assert!(!ok(&obj, format(descriptor, -1)), "с копией — без виртуального файла");
+        assert!(!ok(&obj, format(contents, 0)) && !ok(&obj, format(contents, -1)));
         assert!(!ok(&obj, format(1, -1)), "CF_TEXT не отдаём");
-        let bare: IDataObject = FileData::new(vec![pdf()]).into();
-        assert!(!ok(&bare, format(CF_HDROP.0, -1)), "без копии — без CF_HDROP");
-
-        assert_eq!(
-            get(&obj, format(contents, 0)),
-            b"%PDF-1.7 body",
-            "FILECONTENTS — байты файла"
-        );
-        assert_eq!(
-            get(&obj, format(contents, -1)),
-            b"%PDF-1.7 body",
-            "−1 у одного файла — он же"
-        );
-        assert_eq!(
-            descriptors(&get(&obj, format(descriptor, -1))),
-            [("отчёт.pdf".to_string(), 13, true)]
-        );
         assert_eq!(
             hdrop_paths(&get(&obj, format(CF_HDROP.0, -1))),
             [r"C:\Temp\App\drag\1\отчёт.pdf"]
         );
+
+        let bare: IDataObject = FileData::new(vec![pdf()]).into();
+        assert!(!ok(&bare, format(CF_HDROP.0, -1)), "без копии — без CF_HDROP");
+        assert!(ok(&bare, format(descriptor, -1)));
+        assert!(ok(&bare, format(contents, 0)) && ok(&bare, format(contents, -1)));
+        assert!(!ok(&bare, format(contents, 1)), "второго файла нет");
+        assert_eq!(
+            get(&bare, format(contents, 0)),
+            b"%PDF-1.7 body",
+            "FILECONTENTS — байты файла"
+        );
+        assert_eq!(
+            get(&bare, format(contents, -1)),
+            b"%PDF-1.7 body",
+            "−1 у одного файла — он же"
+        );
+        assert_eq!(
+            descriptors(&get(&bare, format(descriptor, -1))),
+            [("отчёт.pdf".to_string(), 13, true)]
+        );
+    }
+
+    fn zone(path: &Path) -> io::Result<Vec<u8>> {
+        let mut stream = path.as_os_str().to_owned();
+        stream.push(":Zone.Identifier");
+        std::fs::read(PathBuf::from(stream))
+    }
+
+    #[test]
+    fn pets_drag_copy_gets_mark_of_the_web() {
+        let copies = TempCopies::at(std::env::temp_dir().join(format!("pets-motw-test-{}", std::process::id())));
+        let slot = copies.slot().unwrap();
+        let (a, b) = (slot.join("отчёт.pdf"), slot.join("счёт.exe"));
+        std::fs::write(&a, b"%PDF").unwrap();
+        std::fs::write(&b, b"MZ").unwrap();
+        assert!(zone(&a).is_err(), "до перетаскивания метки нет");
+        let data = prepare(vec![pdf().with_copy(a.clone()), pdf().with_copy(b.clone())]).unwrap();
+        assert_eq!(data.formats().len(), 1, "только CF_HDROP");
+        for p in [&a, &b] {
+            let text = String::from_utf8(zone(p).unwrap()).unwrap();
+            assert!(
+                text.starts_with("[ZoneTransfer]") && text.contains("ZoneId=3"),
+                "{text}"
+            );
+            assert_eq!(
+                std::fs::read(p).unwrap().len(),
+                if p == &a { 4 } else { 2 },
+                "содержимое не тронуто"
+            );
+        }
+        mark_from_internet(&a).unwrap();
+        assert_eq!(zone(&a).unwrap(), ZONE_INTERNET, "повторная метка — та же");
+
+        let gone = slot.join("нет.pdf");
+        assert!(
+            prepare(vec![pdf().with_copy(gone.clone())]).is_err(),
+            "копии нет — отказ"
+        );
+        assert!(!gone.exists(), "поток не создал пустой файл");
+        assert!(prepare(vec![pdf()]).is_ok(), "без копий — виртуальный файл");
+        copies.clean().unwrap();
     }
 
     #[test]
