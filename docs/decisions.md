@@ -15,6 +15,17 @@
 - `credentials::write` (macOS, Linux): замена за один шаг, как `CredWriteW`; при сбое прежний секрет цел.
 - `console::stderr_to_file`: одно правило — stderr закрыт или null-устройство (Windows — и `2> NUL`) → файл.
 
+## 2026-11-12. Linux: форки gpui-pre-linux и gpui-pre-wgpu — эмодзи и перетаскивание наружу (GLIN-01)
+
+Владелец (паритет Postman на Linux; класс B согласован 2026-10-26): `crates/pets-gpui-linux` — снимок
+`gpui-pre-linux` 0.3.12, `crates/pets-gpui-wgpu` — снимок `gpui-pre-wgpu` 0.3.12 (crates.io), по образцу
+`pets-gpui-windows`: правки «Pets patch», таблица в README, подмена `[patch.crates-io]` (и в `pets`). Новая полоса
+`gpui-linux`. Без форка нельзя: свежее 0.3.12 нет, в zed main то же.
+- Эмодзи — цветным шрифтом (текстовая система cosmic-text в `gpui-pre-wgpu`).
+- Перетаскивание наружу — upstream API gpui (`on_drag` + `external_drag_payload`); X11 XDND — наш патч, Wayland —
+  upstream. Публичный API: `gpui_linux::pets::drag::{payload, TempCopies, threshold}`; потребитель — Postman
+  (Linux), Урфин не затронут (egui).
+
 ## 2026-11-12. gpui-kit 0.9.1 (gpui-pre 0.3.12) во всех крейтах pets (GKIT-01)
 
 Владелец (класс B согласован в чате): Pets и Postman — с gpui-kit 0.7.3 / gpui-pre =0.3.9 на 0.9.1 / =0.3.12.

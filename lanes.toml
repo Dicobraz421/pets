@@ -22,6 +22,9 @@ paths = ["crates/pets-update/*"]
 [lane.gpui-windows]
 paths = ["crates/pets-gpui-windows/*"]
 
+[lane.gpui-linux]
+paths = ["crates/pets-gpui-linux/*", "crates/pets-gpui-wgpu/*"]
+
 [lane.gpui-macos]
 paths = ["crates/pets-gpui-macos/*"]
 
