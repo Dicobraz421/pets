@@ -4,6 +4,7 @@
 //! `SCScreenshotManager`); macOS 13 — 14.3 и при отказе ScreenCaptureKit — `CGWindowListCreateImage` (устарела с
 //! macOS 14, но работает). Номер окна — `-[NSWindow windowNumber]` и `CGWindowListCopyWindowInfo`.
 
+use std::cell::Cell;
 use std::ffi::c_void;
 use std::io;
 use std::sync::mpsc;
@@ -11,7 +12,8 @@ use std::time::Duration;
 
 use block2::RcBlock;
 use objc2::rc::Retained;
-use objc2::{AnyThread as _, MainThreadMarker};
+use objc2::runtime::AnyObject;
+use objc2::{AnyThread as _, MainThreadMarker, Message as _, class, msg_send};
 use objc2_app_kit::NSView;
 use objc2_core_graphics::CGImage;
 use objc2_foundation::NSError;
@@ -129,6 +131,45 @@ pub fn id(window: &impl HasWindowHandle) -> io::Result<isize> {
         return Err(io::Error::other("window is not on screen"));
     }
     Ok(number)
+}
+
+/// Попросить систему перерисовать окно — стандартно для AppKit: `setNeedsDisplay:` у вида окна и
+/// `-[NSWindow displayIfNeeded]`. AppKit зовёт `displayLayer:`, и gpui рисует кадр синхронно, не дожидаясь своей
+/// ссылки кадров (GMAC-01: на виртуальном дисплее CI `CAMetalDisplayLink` надолго замолкает). Делается на ближайшем
+/// проходе главной очереди (`NSOperationQueue.mainQueue` будит цикл), вне текущего обновления gpui; повторные вызовы
+/// до него сливаются в один. Вызывать в главном потоке.
+pub fn redraw(window: &impl HasWindowHandle) -> io::Result<()> {
+    thread_local! {
+        static PENDING: Cell<bool> = const { Cell::new(false) };
+    }
+    let handle = window
+        .window_handle()
+        .map_err(|e| io::Error::other(format!("window handle: {e}")))?;
+    let RawWindowHandle::AppKit(h) = handle.as_raw() else {
+        return Err(io::Error::new(io::ErrorKind::Unsupported, "not an AppKit window"));
+    };
+    if MainThreadMarker::new().is_none() {
+        return Err(io::Error::other("redraw: not the main thread"));
+    }
+    if PENDING.replace(true) {
+        return Ok(());
+    }
+    // SAFETY: `ns_view` — живой NSView окна, пока жив `window` (заимствован на время вызова); блок держит его копию.
+    let view = unsafe { h.ns_view.cast::<NSView>().as_ref() }.retain();
+    let block = RcBlock::new(move || {
+        PENDING.set(false);
+        view.setNeedsDisplay(true);
+        if let Some(window) = view.window() {
+            window.displayIfNeeded();
+        }
+    });
+    // SAFETY: `+[NSOperationQueue mainQueue]` и `-addOperationWithBlock:` (блок копирует очередь); главная очередь
+    // исполняет блок в главном потоке, где и живёт вид.
+    unsafe {
+        let queue: *mut AnyObject = msg_send![class!(NSOperationQueue), mainQueue];
+        let _: () = msg_send![queue, addOperationWithBlock: &*block];
+    }
+    Ok(())
 }
 
 /// Число из словаря окна.
