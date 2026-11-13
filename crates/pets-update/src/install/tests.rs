@@ -414,3 +414,89 @@ fn payload_rejects_link() {
     let signature = fs::read_to_string(&s.job.signature).unwrap();
     assert!(verify::verify_file(&[&s.key], &s.job.name, &s.job.file, &signature).is_err());
 }
+
+// ── AppImage и пакеты Linux ─────────────────────────────────────────────────────────────────────────────────────
+
+/// Подписанный «новый AppImage» и старый `Postman.AppImage` (`app_exe`) в папке `Apps`.
+fn appimage_job() -> Signed {
+    let mut signed = signed_job(InstallKind::AppImage);
+    let apps = signed.job.dir.join("Apps");
+    fs::create_dir_all(&apps).unwrap();
+    signed.job.app_exe = apps.join("Postman.AppImage");
+    fs::write(&signed.job.app_exe, b"old image").unwrap();
+    signed
+}
+
+fn no_msi(_: &Path) -> Result<i32, UpdateError> {
+    panic!("msiexec must not run")
+}
+
+#[test]
+fn appimage_is_replaced_and_executable() {
+    let signed = appimage_job();
+    apply(&[&signed.key], &signed.job, &mut no_msi).unwrap();
+    assert_eq!(read(&signed.job.app_exe), "installer bytes");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&signed.job.app_exe).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o755);
+    }
+    let left: Vec<_> = fs::read_dir(signed.job.app_exe.parent().unwrap()).unwrap().collect();
+    assert_eq!(left.len(), 1, "temporary file is left: {left:?}");
+}
+
+/// Подменённый после проверки файл не ставится: старый AppImage на месте.
+#[test]
+fn appimage_rejects_replaced_file() {
+    let signed = appimage_job();
+    fs::write(&signed.job.file, b"installer bytes, but evil").unwrap();
+    let err = apply(&[&signed.key], &signed.job, &mut no_msi).unwrap_err();
+    assert!(matches!(err, UpdateError::Signature(SignatureError::Mismatch)), "{err}");
+    assert_eq!(read(&signed.job.app_exe), "old image");
+}
+
+/// Переименование не прошло (на месте файла — непустая папка): временный файл убран, прежнее не тронуто.
+#[test]
+fn appimage_rolls_back_when_replace_fails() {
+    let signed = appimage_job();
+    fs::remove_file(&signed.job.app_exe).unwrap();
+    fs::create_dir_all(signed.job.app_exe.join("busy")).unwrap();
+    let err = apply_appimage(&b"new image"[..], &signed.job.app_exe, 1).unwrap_err();
+    assert!(
+        matches!(
+            err,
+            UpdateError::Io {
+                what: "place new AppImage",
+                ..
+            }
+        ),
+        "{err}"
+    );
+    assert!(signed.job.app_exe.join("busy").is_dir());
+    let left: Vec<_> = fs::read_dir(signed.job.app_exe.parent().unwrap()).unwrap().collect();
+    assert_eq!(left.len(), 1, "temporary file is left: {left:?}");
+}
+
+/// Остаток оборванной установки (временный файл) перезаписывается, не мешает.
+#[test]
+fn appimage_overwrites_stale_temp() {
+    let signed = appimage_job();
+    let temp = signed
+        .job
+        .app_exe
+        .with_file_name(format!(".Postman.AppImage{STAGING_DIR}"));
+    fs::write(&temp, b"stale").unwrap();
+    apply_appimage(&b"new image"[..], &signed.job.app_exe, 1).unwrap();
+    assert_eq!(read(&signed.job.app_exe), "new image");
+    assert!(!temp.exists());
+}
+
+#[test]
+fn packages_are_not_installed() {
+    for kind in [InstallKind::Deb, InstallKind::Rpm] {
+        let signed = signed_job(kind);
+        let err = apply(&[&signed.key], &signed.job, &mut no_msi).unwrap_err();
+        assert!(matches!(err, UpdateError::Invalid(_)), "{err}");
+    }
+}

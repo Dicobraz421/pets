@@ -1,7 +1,8 @@
 //! macOS и Linux: единственный экземпляр — замок файла `Pets.<app>.lock` (`flock`) и unix-сокет `Pets.<app>.sock`
 //! вместо именованного канала. Каталог — свой у пользователя: macOS — `$TMPDIR` (права 0700), Linux —
-//! `$XDG_RUNTIME_DIR` (`/run/user/<uid>`, 0700; нет — `/tmp`, предупреждение в журнал). Журнала событий ОС нет: ошибки
-//! запуска — в stderr (`init_logging`).
+//! `$XDG_RUNTIME_DIR` (`/run/user/<uid>`, 0700). Переменной нет — не общий `/tmp`, а свой каталог `pets-<uid>` в нём
+//! (0700, владелец — этот пользователь; чужой или открытый другим — ошибка, предупреждение в журнал). Ошибка замка —
+//! ошибка, как на Windows (PAR-03).
 //!
 //! macOS: ссылки `mailto:` и файлы из Finder приходят первому экземпляру событием Apple (`on_open_urls` gpui), а не
 //! вторым процессом; сокет — для запуска из терминала и `open -n`. Linux: ссылку `mailto:` из `.desktop` (`%u`)
@@ -10,7 +11,7 @@
 use std::fs::{File, OpenOptions, TryLockError};
 use std::io::{Read as _, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use crate::ShellError;
@@ -28,28 +29,55 @@ pub(crate) struct Guard {
     listener: UnixListener,
 }
 
+/// Переменная с личным каталогом выполнения пользователя.
 #[cfg(target_os = "macos")]
-fn dir() -> PathBuf {
-    std::env::temp_dir()
-}
-
-/// `$XDG_RUNTIME_DIR` (абсолютный путь), иначе `/tmp` — общий каталог: имя сокета видно всем, подключиться можно
-/// только с правами на файл (0600 по umask пользователя).
+const RUNTIME_VAR: &str = "TMPDIR";
 #[cfg(target_os = "linux")]
-fn dir() -> PathBuf {
+const RUNTIME_VAR: &str = "XDG_RUNTIME_DIR";
+
+/// Каталог замка и сокета: `$TMPDIR` (macOS) или `$XDG_RUNTIME_DIR` (Linux), абсолютный путь; иначе свой каталог
+/// [`private_dir`] во временном каталоге системы.
+fn dir() -> Result<PathBuf, ShellError> {
     static DIR: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    DIR.get_or_init(|| match std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from) {
+    if let Some(d) = DIR.get() {
+        return Ok(d.clone());
+    }
+    let d = match std::env::var_os(RUNTIME_VAR).map(PathBuf::from) {
         Some(d) if d.is_absolute() => d,
         _ => {
-            tracing::warn!(target: "pets_shell", "XDG_RUNTIME_DIR is not set: instance socket in temp dir");
-            std::env::temp_dir()
+            tracing::warn!(target: "pets_shell", "{RUNTIME_VAR} is not set: instance socket in a private temp dir");
+            private_dir(&std::env::temp_dir())?
         }
-    })
-    .clone()
+    };
+    Ok(DIR.get_or_init(|| d).clone())
 }
 
-fn path(app: &str, ext: &str) -> PathBuf {
-    dir().join(format!("Pets.{app}.{ext}"))
+/// `base/pets-<uid>` с правами 0700: создать или проверить, что это каталог (не ссылка) этого пользователя, закрытый
+/// для других, — иначе в общем каталоге чужой мог подложить свой.
+fn private_dir(base: &Path) -> Result<PathBuf, ShellError> {
+    use std::os::unix::fs::{DirBuilderExt as _, MetadataExt as _};
+    // SAFETY: без аргументов, не может завершиться неудачей.
+    let uid = unsafe { libc::getuid() };
+    let dir = base.join(format!("pets-{uid}"));
+    match std::fs::DirBuilder::new().mode(0o700).create(&dir) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => return Err(os("instance directory", e)),
+        _ => {}
+    }
+    let meta = std::fs::symlink_metadata(&dir).map_err(|e| os("instance directory", e))?;
+    if !meta.is_dir() || meta.uid() != uid || meta.mode() & 0o077 != 0 {
+        return Err(os(
+            "instance directory",
+            std::io::Error::new(
+                std::io::ErrorKind::PermissionDenied,
+                format!("{} is not a private directory of this user", dir.display()),
+            ),
+        ));
+    }
+    Ok(dir)
+}
+
+fn path(app: &str, ext: &str) -> Result<PathBuf, ShellError> {
+    Ok(dir()?.join(format!("Pets.{app}.{ext}")))
 }
 
 fn os(what: &'static str, source: std::io::Error) -> ShellError {
@@ -62,7 +90,7 @@ pub(crate) fn acquire(app: &str) -> Result<Option<Guard>, ShellError> {
         .create(true)
         .write(true)
         .truncate(false)
-        .open(path(app, "lock"))
+        .open(path(app, "lock")?)
         .map_err(|e| os("instance lock", e))?;
     match lock.try_lock() {
         Ok(()) => {}
@@ -70,7 +98,7 @@ pub(crate) fn acquire(app: &str) -> Result<Option<Guard>, ShellError> {
         Err(TryLockError::Error(e)) => return Err(os("flock", e)),
     }
     // Замок наш — сокет прошлого запуска (упал, не убрал) больше никому не нужен.
-    let sock = path(app, "sock");
+    let sock = path(app, "sock")?;
     match std::fs::remove_file(&sock) {
         Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(os("instance socket", e)),
         _ => {}
@@ -81,7 +109,7 @@ pub(crate) fn acquire(app: &str) -> Result<Option<Guard>, ShellError> {
 
 /// Подключиться к сокету первого экземпляра (повторы до `CONNECT_TIMEOUT`) и передать сообщение.
 pub(crate) fn send(app: &str, message: &[u8]) -> Result<(), ShellError> {
-    let sock = path(app, "sock");
+    let sock = path(app, "sock")?;
     let deadline = Instant::now() + CONNECT_TIMEOUT;
     let mut stream = loop {
         match UnixStream::connect(&sock) {
@@ -120,10 +148,6 @@ pub(crate) fn serve(guard: Guard, on_message: &dyn Fn(Vec<u8>)) {
     }
 }
 
-pub(crate) fn event_source(_app: &str) {}
-
-pub(crate) fn report_event(_id: crate::logging::EventId, _text: &str) {}
-
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc;
@@ -139,5 +163,20 @@ mod tests {
         std::thread::spawn(move || super::serve(first, &move |m| tx.send(m).unwrap()));
         super::send(&app, b"hello").unwrap();
         assert_eq!(rx.recv_timeout(Duration::from_secs(5)).unwrap(), b"hello");
+    }
+
+    /// Без каталога выполнения — свой каталог 0700; открытый для других — ошибка, а не общий каталог.
+    #[test]
+    fn private_dir_is_owned_and_closed() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let base = std::env::temp_dir().join(format!("pets-shell-dir-test-{}", std::process::id()));
+        std::fs::create_dir_all(&base).unwrap();
+        let dir = super::private_dir(&base).unwrap();
+        let mode = std::fs::metadata(&dir).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o700);
+        assert_eq!(super::private_dir(&base).unwrap(), dir);
+        std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(super::private_dir(&base).is_err());
+        std::fs::remove_dir_all(&base).unwrap();
     }
 }

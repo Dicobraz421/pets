@@ -8,6 +8,42 @@
 только как `CF_HDROP`, `drag_out` перед перетаскиванием пишет на копию `Zone.Identifier` (`ZoneId=3`) и при неудаче
 возвращает ошибку; без копий — виртуальные файлы и WARN. Новое API — `mark_from_internet(&Path)`. Потребитель —
 Postman (Урфин на egui этот модуль не берёт). Обоснование выбора против `IAttachmentExecute` — README крейта.
+## 2026-11-13. pets-shell: одно поведение на всех ОС (PAR-03, аудит Postman №21, 37, 39, 42)
+
+Владелец (класс B согласован в чате, 2026-10-26), договор — ADR Postman 0011. Сигнатуры не менялись; меняется
+поведение и контракт:
+- `single_instance`: ошибка (замок, канал, каталог) — приложение не открывает второе окно, а сообщает ошибку и выходит
+  (`fatal`), на всех ОС. Без `$XDG_RUNTIME_DIR` (macOS — `$TMPDIR`) замок и сокет — в своём каталоге `<tmp>/pets-<uid>`
+  (0700, владелец проверяется), не в общем `/tmp`. **Потребителям (Postman, Урфин):** ветку «ошибка → работаем как
+  первый» заменить на `fatal`.
+- `SystemLog`/`system_event`: macOS — os_log (подсистема — имя приложения), Linux — journald (сокет, без `libsystemd`);
+  уровни и коды — как на Windows (`LOGGING.md`). Приложению ничего менять не нужно.
+- `credentials::write` (macOS, Linux): замена за один шаг, как `CredWriteW`; при сбое прежний секрет цел.
+- `console::stderr_to_file`: одно правило — stderr закрыт или null-устройство (Windows — и `2> NUL`) → файл.
+
+## 2026-11-13. pets-update: Linux — AppImage, deb/rpm ссылкой (UPD-LIN)
+
+Владелец (паритет Postman на Linux, Postman `docs/decisions/2026-11-12-linux.md`, PR #627; класс B согласован
+2026-10-26). Публичный API добавлен, прежнее не менялось:
+- `InstallKind::{AppImage, Deb, Rpm}` (`#[non_exhaustive]` нет — потребителям с `match` по виду добавить ветки);
+  артефакты `<prefix>-<версия>-linux-<arch>.{AppImage,deb,rpm}` + `.minisig`.
+- `InstallKind::detect_linux(appimage, exe, root)` / `current_linux()`: `$APPIMAGE` → AppImage; exe под `/usr` →
+  Deb (`dpkg`) или Rpm (`rpm`); иначе `None`. `InstallKind::can_install()` — `false` для deb/rpm.
+- AppImage: подпись тем же путём (проверенная копия в памяти), запись рядом во временный, `0o755`, атомарное
+  переименование; помощник — копия образа, `InstallPlan::restart_current` берёт `$APPIMAGE`.
+- deb/rpm: не ставим (нужен root) — продукт показывает версию и ссылку «Скачать» (`Update::asset_url`).
+Потребители: Postman (Linux) подключает; Урфин (Windows) не затронут.
+
+## 2026-11-12. Linux: форки gpui-pre-linux и gpui-pre-wgpu — эмодзи и перетаскивание наружу (GLIN-01)
+
+Владелец (паритет Postman на Linux; класс B согласован 2026-10-26): `crates/pets-gpui-linux` — снимок
+`gpui-pre-linux` 0.3.12, `crates/pets-gpui-wgpu` — снимок `gpui-pre-wgpu` 0.3.12 (crates.io), по образцу
+`pets-gpui-windows`: правки «Pets patch», таблица в README, подмена `[patch.crates-io]` (и в `pets`). Новая полоса
+`gpui-linux`. Без форка нельзя: свежее 0.3.12 нет, в zed main то же.
+- Эмодзи — цветным шрифтом (текстовая система cosmic-text в `gpui-pre-wgpu`).
+- Перетаскивание наружу — upstream API gpui (`on_drag` + `external_drag_payload`); X11 XDND — наш патч, Wayland —
+  upstream. Публичный API: `gpui_linux::pets::drag::{payload, TempCopies, threshold}`; потребитель — Postman
+  (Linux), Урфин не затронут (egui).
 
 ## 2026-11-12. gpui-kit 0.9.1 (gpui-pre 0.3.12) во всех крейтах pets (GKIT-01)
 

@@ -3,7 +3,8 @@
 //! У GUI-процесса stdout и stderr пусты, если их не перенаправили. [`attach_parent`] — для строк вывода в консоль
 //! родителя: перенаправленный поток (`> файл`, канал Git Bash) остаётся как есть, пустой — в консоль родителя
 //! (`AttachConsole(ATTACH_PARENT_PROCESS)`, затем `CONOUT$`); нет консоли у родителя (Проводник) — ничего.
-//! [`stderr_to_file`] — журнал: поток ошибок — в файл.
+//! [`stderr_to_file`] — журнал: поток ошибок — в файл, если он ведёт в никуда (закрыт или `NUL`) — правило одно с
+//! macOS и Linux (PAR-03).
 
 use std::os::windows::io::IntoRawHandle as _;
 use std::path::Path;
@@ -11,10 +12,11 @@ use std::path::Path;
 use windows_sys::Win32::Foundation::{GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE};
 use windows_sys::Win32::Globalization::GetACP;
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_UNKNOWN, GetFileType, OPEN_EXISTING,
+    CreateFileW, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TYPE_CHAR, FILE_TYPE_UNKNOWN, GetFileType, OPEN_EXISTING,
 };
 use windows_sys::Win32::System::Console::{
-    ATTACH_PARENT_PROCESS, AttachConsole, GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE, STD_OUTPUT_HANDLE, SetStdHandle,
+    ATTACH_PARENT_PROCESS, AttachConsole, CONSOLE_MODE, GetConsoleMode, GetStdHandle, STD_ERROR_HANDLE, STD_HANDLE,
+    STD_OUTPUT_HANDLE, SetStdHandle,
 };
 
 use super::{last_os, to_wide};
@@ -24,6 +26,16 @@ use crate::ShellError;
 fn usable(h: HANDLE) -> bool {
     // SAFETY: GetFileType с чужим или закрытым описателем возвращает FILE_TYPE_UNKNOWN, а не UB.
     !h.is_null() && h != INVALID_HANDLE_VALUE && unsafe { GetFileType(h) } != FILE_TYPE_UNKNOWN
+}
+
+/// Поток ведёт в никуда: описателя нет, он не годится для записи или это `NUL` (символьное устройство, не консоль).
+fn void(h: HANDLE) -> bool {
+    if !usable(h) {
+        return true;
+    }
+    let mut mode: CONSOLE_MODE = 0;
+    // SAFETY: описатель проверен выше; `mode` — локальная переменная.
+    unsafe { GetFileType(h) == FILE_TYPE_CHAR && GetConsoleMode(h, &mut mode) == 0 }
 }
 
 /// Пустые stdout и stderr — в консоль родителя, если она есть. Вызывать в начале `main`.
@@ -69,12 +81,12 @@ pub fn attach_parent() {
     }
 }
 
-/// Процесс без консоли: поток ошибок — в конец файла `path` (туда пишет `tracing` в stderr). Поток ошибок уже есть
-/// (консоль, перенаправление) — ничего, `Ok(false)`. `Ok(true)` — журнал пишется в файл.
+/// Поток ошибок ведёт в никуда (процесс без консоли, закрыт, `2> NUL`): он — в конец файла `path` (туда пишет
+/// `tracing` в stderr). Консоль, файл, канал — ничего, `Ok(false)`. `Ok(true)` — журнал пишется в файл. Правило одно
+/// на всех ОС (macOS и Linux — закрыт или `/dev/null`).
 pub fn stderr_to_file(path: &Path) -> Result<bool, ShellError> {
     // SAFETY: без аргументов-указателей; описатель не закрываем.
-    let current = unsafe { GetStdHandle(STD_ERROR_HANDLE) };
-    if !current.is_null() && current != INVALID_HANDLE_VALUE {
+    if !void(unsafe { GetStdHandle(STD_ERROR_HANDLE) }) {
         return Ok(false);
     }
     if let Some(dir) = path.parent() {
