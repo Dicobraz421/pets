@@ -1,7 +1,7 @@
 //! Платформенный код: единственный экземпляр, журнал событий ОС, реестр, учётные данные, стандартные потоки, разбивка
-//! памяти, буфер обмена (HTML); macOS — экземпляр через unix-сокет, Связка ключей, обработчик схемы адресов, поток
+//! памяти, буфер обмена (HTML); macOS — экземпляр через unix-сокет, os_log, Связка ключей, обработчик схемы адресов, поток
 //! ошибок в файл, буфер обмена (HTML), объект входа, управляемые настройки, память процесса; Linux — то же по
-//! стандартам freedesktop (Secret Service, `.desktop`, `xdg-mime`, `/proc`). `unsafe` — только здесь.
+//! стандартам freedesktop (journald, Secret Service, `.desktop`, `xdg-mime`, `/proc`). `unsafe` — только здесь.
 
 #[cfg(windows)]
 mod windows;
@@ -17,6 +17,15 @@ pub(crate) use unix::*;
 mod other;
 #[cfg(not(any(windows, target_os = "macos", target_os = "linux")))]
 pub(crate) use other::*;
+
+#[cfg(target_os = "macos")]
+#[path = "oslog_macos.rs"]
+mod event_log;
+#[cfg(target_os = "linux")]
+#[path = "journald_linux.rs"]
+mod event_log;
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+pub(crate) use event_log::{event_source, report_event};
 
 #[cfg(any(target_os = "macos", target_os = "linux"))]
 #[path = "console_unix.rs"]
