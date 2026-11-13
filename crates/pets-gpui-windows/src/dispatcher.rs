@@ -119,15 +119,20 @@ impl PlatformDispatcher for WindowsDispatcher {
         match self.main_sender.send(priority, runnable) {
             Ok(_) => {
                 if !self.wake_posted.swap(true, Ordering::AcqRel) {
-                    unsafe {
-                        PostMessageW(
-                            Some(self.platform_window_handle.as_raw()),
-                            WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD,
-                            WPARAM(self.validation_number),
-                            LPARAM(0),
-                        )
-                        .log_err();
-                    }
+                    // Pets patch: tasks dispatched while the app shuts down find the platform
+                    // window already destroyed — not an error.
+                    let hwnd = self.platform_window_handle.as_raw();
+                    crate::log_hwnd_err(
+                        unsafe {
+                            PostMessageW(
+                                Some(hwnd),
+                                WM_GPUI_TASK_DISPATCHED_ON_MAIN_THREAD,
+                                WPARAM(self.validation_number),
+                                LPARAM(0),
+                            )
+                        },
+                        hwnd,
+                    );
                 }
             }
             Err(runnable) => {

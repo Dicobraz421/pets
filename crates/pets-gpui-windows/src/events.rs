@@ -6,7 +6,7 @@ use windows::{
     Win32::{
         Foundation::*,
         Graphics::Gdi::*,
-        System::SystemServices::*,
+        System::{Ole::RevokeDragDrop, SystemServices::*},
         UI::{
             Controls::*,
             HiDpi::*,
@@ -351,6 +351,11 @@ impl WindowsWindowInner {
 
     fn handle_destroy_msg(&self, handle: HWND) -> Option<isize> {
         let callback = { self.state.callbacks.close.take() };
+        // Pets patch: the HWND is valid only until this message returns. Revoke drag-drop
+        // here (MSDN: before the window is destroyed) and remember that it is gone, so `Drop`
+        // of the window does not hide, revoke or destroy a dead handle (ERROR on every close).
+        self.state.destroyed.set(true);
+        unsafe { RevokeDragDrop(handle) }.log_err();
         // Re-enable parent window if this was a modal dialog
         if let Some(parent_hwnd) = self.parent_hwnd {
             unsafe {
@@ -362,15 +367,18 @@ impl WindowsWindowInner {
         if let Some(callback) = callback {
             callback();
         }
-        unsafe {
-            PostMessageW(
-                Some(self.platform_window_handle),
-                WM_GPUI_CLOSE_ONE_WINDOW,
-                WPARAM(self.validation_number),
-                LPARAM(handle.0 as isize),
-            )
-            .log_err();
-        }
+        // Pets patch: at shutdown the platform window may already be gone — not an error.
+        log_hwnd_err(
+            unsafe {
+                PostMessageW(
+                    Some(self.platform_window_handle),
+                    WM_GPUI_CLOSE_ONE_WINDOW,
+                    WPARAM(self.validation_number),
+                    LPARAM(handle.0 as isize),
+                )
+            },
+            self.platform_window_handle,
+        );
         Some(0)
     }
 

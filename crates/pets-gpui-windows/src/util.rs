@@ -189,3 +189,103 @@ where
     }
     result
 }
+
+/// Pets patch: Win32 failure codes meaning "this window handle no longer exists".
+fn is_window_gone_error(code: windows::core::HRESULT) -> bool {
+    code == ERROR_INVALID_WINDOW_HANDLE.to_hresult() || code == DRAGDROP_E_INVALIDHWND
+}
+
+/// Pets patch: whether a failed call on `hwnd` is the expected race with its destruction.
+///
+/// Messages and deferred calls (vsync redraw, posted tasks, `Drop` of the window) can reach a
+/// window or the platform window after it was destroyed: the user closed it, or the app is
+/// shutting down. Such a failure is not an error — only when the code says "invalid window
+/// handle" *and* the window is really gone. Any other failure, or this code on a live window,
+/// stays an error.
+pub(crate) fn is_expected_after_destroy(code: windows::core::HRESULT, hwnd: HWND) -> bool {
+    is_window_gone_error(code) && !unsafe { IsWindow(Some(hwnd)) }.as_bool()
+}
+
+/// Pets patch: like [`ResultExt::log_err`] for a Win32 call on `hwnd`, but a failure because
+/// the window was already destroyed goes to DEBUG (`crates/pets-shell/LOGGING.md`: nothing for
+/// a person to do), not to ERROR and the system log.
+#[track_caller]
+pub(crate) fn log_hwnd_err<T>(result: windows::core::Result<T>, hwnd: HWND) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(error) if is_expected_after_destroy(error.code(), hwnd) => {
+            log::debug!("window {:?} already destroyed: {error}", hwnd.0);
+            None
+        }
+        Err(error) => Err::<T, _>(error).log_err(),
+    }
+}
+
+#[cfg(test)]
+mod pets_destroyed_window_tests {
+    // Not `super::*`: it brings `gpui::test`, which shadows `#[test]`.
+    use super::{is_expected_after_destroy, log_hwnd_err};
+    use windows::Win32::{Foundation::*, UI::WindowsAndMessaging::*};
+    use windows::core::w;
+
+    /// A real top-level window, destroyed right away: its handle is what late calls see.
+    fn destroyed_hwnd() -> HWND {
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("pets destroyed window test"),
+                WS_OVERLAPPED,
+                0,
+                0,
+                10,
+                10,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("create test window");
+            DestroyWindow(hwnd).expect("destroy test window");
+            hwnd
+        }
+    }
+
+    #[test]
+    fn pets_late_calls_on_destroyed_window_are_expected() {
+        let hwnd = destroyed_hwnd();
+        let post = unsafe { PostMessageW(Some(hwnd), WM_NULL, WPARAM(0), LPARAM(0)) };
+        let error = post.clone().expect_err("posting to a destroyed window fails");
+        assert!(is_expected_after_destroy(error.code(), hwnd));
+        let destroy = unsafe { DestroyWindow(hwnd) }.expect_err("second destroy fails");
+        assert!(is_expected_after_destroy(destroy.code(), hwnd));
+        assert!(is_expected_after_destroy(DRAGDROP_E_INVALIDHWND, hwnd));
+        assert_eq!(log_hwnd_err(post, hwnd), None);
+    }
+
+    #[test]
+    fn pets_invalid_handle_on_live_window_stays_error() {
+        unsafe {
+            let hwnd = CreateWindowExW(
+                WINDOW_EX_STYLE::default(),
+                w!("STATIC"),
+                w!("pets live window test"),
+                WS_OVERLAPPED,
+                0,
+                0,
+                10,
+                10,
+                None,
+                None,
+                None,
+                None,
+            )
+            .expect("create test window");
+            let code = ERROR_INVALID_WINDOW_HANDLE.to_hresult();
+            assert!(!is_expected_after_destroy(code, hwnd));
+            DestroyWindow(hwnd).expect("destroy test window");
+        }
+        // Another failure on a destroyed window is still an error.
+        assert!(!is_expected_after_destroy(E_FAIL, destroyed_hwnd()));
+    }
+}
