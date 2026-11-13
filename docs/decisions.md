@@ -2,6 +2,19 @@
 
 Новое решение — сверху, с датой.
 
+## 2026-11-13. pets-update: Linux — AppImage, deb/rpm ссылкой (UPD-LIN)
+
+Владелец (паритет Postman на Linux, Postman `docs/decisions/2026-11-12-linux.md`, PR #627; класс B согласован
+2026-10-26). Публичный API добавлен, прежнее не менялось:
+- `InstallKind::{AppImage, Deb, Rpm}` (`#[non_exhaustive]` нет — потребителям с `match` по виду добавить ветки);
+  артефакты `<prefix>-<версия>-linux-<arch>.{AppImage,deb,rpm}` + `.minisig`.
+- `InstallKind::detect_linux(appimage, exe, root)` / `current_linux()`: `$APPIMAGE` → AppImage; exe под `/usr` →
+  Deb (`dpkg`) или Rpm (`rpm`); иначе `None`. `InstallKind::can_install()` — `false` для deb/rpm.
+- AppImage: подпись тем же путём (проверенная копия в памяти), запись рядом во временный, `0o755`, атомарное
+  переименование; помощник — копия образа, `InstallPlan::restart_current` берёт `$APPIMAGE`.
+- deb/rpm: не ставим (нужен root) — продукт показывает версию и ссылку «Скачать» (`Update::asset_url`).
+Потребители: Postman (Linux) подключает; Урфин (Windows) не затронут.
+
 ## 2026-11-12. Linux: форки gpui-pre-linux и gpui-pre-wgpu — эмодзи и перетаскивание наружу (GLIN-01)
 
 Владелец (паритет Postman на Linux; класс B согласован 2026-10-26): `crates/pets-gpui-linux` — снимок
