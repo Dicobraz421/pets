@@ -11,12 +11,15 @@
 //! - [`drag`] — перетаскивание файлов из окна в Finder и другие приложения (`NSDraggingSession`), копии во временном
 //!   каталоге приложения;
 //! - [`toast`] — уведомление центра уведомлений (`UNUserNotificationCenter`); нужен `.app` с идентификатором пакета;
-//! - [`dock`] — бейдж на значке в Dock (`NSDockTile`), например число непрочитанных.
+//! - [`dock`] — бейдж на значке в Dock (`NSDockTile`), например число непрочитанных;
+//! - [`status_item`] — значок в строке меню (`NSStatusItem`): шаблон, число рядом, меню приложения.
 
 #[cfg(target_os = "macos")]
 pub mod dock;
 #[cfg(target_os = "macos")]
 pub mod drag;
+#[cfg(target_os = "macos")]
+pub mod status_item;
 #[cfg(target_os = "macos")]
 pub mod toast;
 #[cfg(target_os = "macos")]
