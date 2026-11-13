@@ -13,7 +13,7 @@ gpui-pre-macos = { git = "https://github.com/Dicobraz/pets", rev = "<комми�
 
 | Патч | Файлы | Upstream |
 |---|---|---|
-| Кадры — от CVDisplayLink, как в 0.3.9 (gpui-kit 0.7.3); `CAMetalDisplayLink` (macOS 14+) — только по `GPUI_METAL_DISPLAY_LINK=1` (раз за процесс). Окно на 0.3.12 переставало получать кадры на 7–44 с при спросе на них (Postman, снимки macOS CI: 0.7.3 — 17/17 без пауз, 0.9.1 — 4/6 с паузами) | `src/window.rs`, `src/gpui_macos.rs` | кандидат (отчёт ниже) |
+| Аварийный откат кадров на CVDisplayLink — `GPUI_CV_DISPLAY_LINK=1` (раз за процесс). По умолчанию — как в исходнике и как рекомендует Apple: `CAMetalDisplayLink` на macOS 14+, CVDisplayLink на macOS 13 (там Metal-ссылки нет) | `src/window.rs`, `src/gpui_macos.rs` | — |
 | Диагностика кадров (GMAC-01, цель `gpui_macos::frames`, сторож пауз) — см. ниже | `src/frames_diag.rs`, `src/frames_logic.rs`, `src/display_link.rs`, `src/window.rs`, `src/platform.rs` | — |
 
 ## Диагностика кадров
@@ -41,41 +41,27 @@ gpui-pre-macos = { git = "https://github.com/Dicobraz/pets", rev = "<комми�
   длительность паузы — до первого кадра после неё. `preferredFrameRateRange` не виден: ссылка закрыта в gpui_apple.
 - При первом окне — INFO: версия macOS, `hw.model`, экраны с частотой, выбранный путь кадров.
 
-Прогон с Metal-путём: `GPUI_METAL_DISPLAY_LINK=1 GPUI_FRAMES_WATCHDOG=1 POSTMAN_LOG=info,gpui_macos::frames=trace`.
+Прогон с диагностикой: `GPUI_FRAMES_WATCHDOG=1 POSTMAN_LOG=info,gpui_macos::frames=trace`. Пока окно не видно
+(перекрыто, другой Space, свёрнуто), спрос без кадра — не пауза: DEBUG `frame demand while hidden`, не WARN.
 Чистая логика (кольцо, порог сторожа) — `src/frames_logic.rs`, её тесты идут в `pets-gpui-macos` на любой ОС.
 
-## Почему CVDisplayLink, а не правка Metal-пути
+## Вывод GMAC-01 (2026-11-13)
 
-Доказанной первопричины в Metal-пути пока нет: зависание воспроизводится только на macOS-раннерах Postman, а здесь
-(облако Linux) его не воспроизвести. Что видно по коду 0.3.12:
-- Metal-ссылка — единственный источник кадров, который сам останавливается при спросе: `MetalFrames::end_frame`
-  ставит паузу после обновления, где gpui не рисовал и не будил; снять её может только `wake()` (через waker
-  инвалидатора, `schedule_frame`, `on_next_frame`). Waker инвалидатора зовётся лишь при переходе `dirty`
-  false→true: если пауза случится при уже грязном окне, следующее пробуждение не придёт.
-- `wake()` молча ничего не делает, если ссылки нет (`stop_display_link` её отсоединяет при перекрытии,
-  `display_layer`, активации) или она занята (`try_borrow`), а `start_display_link` молча выходит у окна,
-  которое AppKit не считает видимым. Дальше кадры приходят только с системной перерисовкой (`display_layer`) —
-  это совпадает с паузами «до hh:mm:00».
-- CVDisplayLink 0.3.12 — тот же путь, что в 0.3.9: тикает непрерывно, пока окно видимо, пауз по спросу нет.
+Паузы 7–55 с на Metal-пути — особенность виртуального дисплея macOS-раннеров CI (`VirtualMac2,1`), а не gpui:
+- CI: во время паузы ссылка подключена и не на паузе, пробуждения до неё доходят, drawable в работе — 0, а колбэков
+  нет; у всех drawable `presentedTime=0` — виртуальный дисплей не показывает ни одного кадра. Возврат — часто на
+  границе минуты (системная перерисовка).
+- Настоящий Mac (M4, 120 Гц, macOS 26.5, 7 мин): пока окно видно — ни одного пропуска дольше 150 мс; все «паузы» —
+  при действительно скрытом окне (другой Space или приложение, перекрытие), возврат к окну — 25–50 мс.
 
-Возврат CVDisplayLink — откат к проверенному поведению (17/17), а не маскировка: таймеров, тайм-аутов и лишних
-перерисовок нет. Metal-путь остаётся за переключателем, чтобы найти точную причину и отправить исправление:
-снимки Postman с `GPUI_METAL_DISPLAY_LINK=1 RUST_LOG=gpui_macos::frames=debug` покажут, какое событие предшествует
-паузе (пауза при грязном окне, отсоединение без нового старта или потерянное пробуждение).
+Поэтому путь кадров — стандартный (решение владельца «как положено по стандарту вендора»): Apple рекомендует
+`CAMetalDisplayLink` для Metal на macOS 14+, CVDisplayLink устарел с macOS 15. Отчёт в zed не нужен. Снимки Postman на
+CI не ждут ссылку: перед кадром просят систему перерисовать окно (`pets_gpui_macos::window::redraw`, `displayLayer:`).
 
-## Текст отчёта upstream (zed-industries/zed, кандидат)
+По коду форк теперь почти совпадает с исходником; держим его ради диагностики и отката.
 
-> **macOS: window stops receiving frames for seconds with `CAMetalDisplayLink` (gpui_macos, zed@d2a4fb6)**
->
-> On macOS 14+ a window driven by `FrameSource::Metal` sometimes gets no frame requests for 7–44 s although GPUI
-> keeps asking (`request_animation_frame` + `on_next_frame` every frame); frames resume only on the next
-> `displayLayer:` (often on a minute boundary). With the `CVDisplayLink` source the same app never stalls (17/17
-> CI runs vs 4/6 stalled). Candidates: the link is paused in `MetalFrames::end_frame` while the invalidator is
-> already dirty (its waker fires only on a clean→dirty transition); `wake()` is dropped when the link is detached
-> or borrowed; `start_display_link` returns early for a window AppKit reports as occluded. Logs with the
-> `gpui_macos::frames` debug target attached.
+Тест нашей части: `cargo test --manifest-path crates/pets-gpui-macos-platform/Cargo.toml --lib -- pets_` (macOS);
+логика сторожа — `cargo test -p pets-gpui-macos` (любая ОС).
 
-Тест нашей части: `cargo test --manifest-path crates/pets-gpui-macos-platform/Cargo.toml --lib -- pets_` (macOS).
-
-При обновлении gpui-kit: взять новый `gpui-pre-macos` с crates.io, проверить, исправлена ли пауза Metal-ссылки;
-если нет — перенести правку и прогнать снимки Postman (`macos.yml`, `bundle --screens`, 3 прогона без пауз).
+При обновлении gpui-kit: взять новый `gpui-pre-macos` с crates.io, перенести правки «Pets patch» и прогнать снимки
+Postman (`macos.yml`, вход `frames_diag`: 3 прогона без `frame stall` при видимом окне).

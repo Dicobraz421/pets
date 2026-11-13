@@ -128,20 +128,21 @@ fn ns_string(string: &str) -> *mut AnyObject {
     Retained::autorelease_ptr(NSString::from_str(string)).cast()
 }
 
-/// Pets patch: `CAMetalDisplayLink` вместо CVDisplayLink — только по `GPUI_METAL_DISPLAY_LINK=1`
-/// (читается раз за процесс). См. `README.md` форка.
-pub(crate) fn pets_metal_display_link() -> bool {
-    static METAL: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *METAL.get_or_init(|| std::env::var_os("GPUI_METAL_DISPLAY_LINK").is_some_and(|v| v == "1"))
+/// Pets patch: аварийный откат кадров на CVDisplayLink — `GPUI_CV_DISPLAY_LINK=1` (читается раз за
+/// процесс). По умолчанию — как в исходнике и у Apple: `CAMetalDisplayLink` на macOS 14+, CVDisplayLink
+/// на macOS 13. См. `README.md` форка.
+pub(crate) fn pets_cv_display_link() -> bool {
+    static CV: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *CV.get_or_init(|| std::env::var_os("GPUI_CV_DISPLAY_LINK").is_some_and(|v| v == "1"))
 }
 
 #[cfg(test)]
 mod pets_tests {
-    /// Pets patch: без переменной окружения кадры идут от CVDisplayLink.
+    /// Pets patch: без переменной окружения откат на CVDisplayLink выключен.
     #[test]
-    fn pets_cv_display_link_by_default() {
-        if std::env::var_os("GPUI_METAL_DISPLAY_LINK").is_none() {
-            assert!(!super::pets_metal_display_link());
+    fn pets_metal_display_link_by_default() {
+        if std::env::var_os("GPUI_CV_DISPLAY_LINK").is_none() {
+            assert!(!super::pets_cv_display_link());
         }
     }
 }

@@ -1197,11 +1197,9 @@ impl MacWindow {
             let native_view: *mut AnyObject = msg_send![native_view, initWithFrame: content_bounds];
             assert!(!native_view.is_null());
 
-            // Pets patch: кадры — от CVDisplayLink, как до 0.3.12. `CAMetalDisplayLink` (macOS 14+)
-            // ставится на паузу после «пустого» кадра и отсоединяется при перекрытии окна; окно
-            // переставало получать кадры на 7–44 с при спросе на них (Postman, снимки macOS CI).
-            // Вернуть Metal-ссылку — `GPUI_METAL_DISPLAY_LINK=1`.
-            let metal_path = crate::pets_metal_display_link() && MetalFrameSource::is_available();
+            // Pets patch: как в исходнике — `CAMetalDisplayLink` на macOS 14+, иначе CVDisplayLink;
+            // аварийный откат на CVDisplayLink — `GPUI_CV_DISPLAY_LINK=1`.
+            let metal_path = !crate::pets_cv_display_link() && MetalFrameSource::is_available();
             let diag = WindowDiag::new(if metal_path {
                 FramePath::Metal
             } else {
@@ -3822,11 +3820,11 @@ fn pets_frames_startup_info(main_thread: MainThreadMarker, metal_path: bool) {
             .collect::<Vec<_>>()
             .join(", ");
         let path = if metal_path {
-            "CAMetalDisplayLink (GPUI_METAL_DISPLAY_LINK=1)"
-        } else if crate::pets_metal_display_link() {
-            "CVDisplayLink (GPUI_METAL_DISPLAY_LINK=1, CAMetalDisplayLink unavailable)"
+            "CAMetalDisplayLink"
+        } else if crate::pets_cv_display_link() {
+            "CVDisplayLink (GPUI_CV_DISPLAY_LINK=1)"
         } else {
-            "CVDisplayLink"
+            "CVDisplayLink (CAMetalDisplayLink unavailable: macOS 13)"
         };
         let app_sleep_disabled: bool = unsafe {
             let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];

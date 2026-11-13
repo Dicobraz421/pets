@@ -147,54 +147,113 @@ impl fmt::Display for RingEntry {
 /// Переход сторожа.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Stall {
-    /// Спрос без кадра дольше порога.
-    Began { waited_ms: u64 },
+    /// Спрос без кадра дольше порога при видимом окне. `since` — начало спроса, `waited_ms` — с начала
+    /// спроса или с момента, когда окно снова стало видно.
+    Began { since: u64, waited_ms: u64 },
+    /// Окно не видно (перекрыто, другой Space, свёрнуто), а gpui ждёт кадра дольше порога — не пауза.
+    Hidden { since: u64, waited_ms: u64 },
     /// Кадр пришёл: пауза длилась `after_ms`; `resumed_after_ms` — когда до этого ссылку
-    /// возобновило пробуждение или запуск (от начала спроса).
+    /// возобновило пробуждение или запуск (от начала паузы).
     Ended {
         after_ms: u64,
         cause: FrameCause,
         resumed_after_ms: Option<u64>,
     },
+    /// Кадр пришёл к окну, которое ждало его скрытым.
+    HiddenEnded { after_ms: u64, cause: FrameCause },
+}
+
+#[derive(Clone, Copy)]
+struct Watch {
+    /// Начало спроса.
+    demand: u64,
+    /// Начало паузы: спрос или последний тик, когда окно было скрыто.
+    start: u64,
+    hidden: bool,
 }
 
 /// Логика порога сторожа для одного окна — чистая функция времени.
 #[derive(Default)]
 pub(crate) struct StallTracker {
-    /// Начало спроса, по которому уже написан `frame stall`.
-    since: Option<u64>,
+    /// Спрос, по которому уже написано событие.
+    watch: Option<Watch>,
+    /// Последний тик, когда окно было скрыто.
+    hidden_at: Option<u64>,
 }
 
 impl StallTracker {
+    /// `first_frame` — первый кадр после начала спроса, о котором написано событие.
     pub fn tick(
         &mut self,
         now: u64,
         demand_since: Option<u64>,
-        last_frame: Option<(u64, FrameCause)>,
+        first_frame: Option<(u64, FrameCause)>,
         last_resume: Option<u64>,
+        hidden: bool,
         threshold_ms: u64,
     ) -> Option<Stall> {
-        match self.since {
-            None => {
-                let since = demand_since?;
-                let waited_ms = now.saturating_sub(since);
-                (waited_ms >= threshold_ms).then(|| {
-                    self.since = Some(since);
-                    Stall::Began { waited_ms }
-                })
+        let hidden_before = self.hidden_at;
+        if hidden {
+            self.hidden_at = Some(now);
+        }
+        let Some(watch) = self.watch else {
+            let demand = demand_since?;
+            let start = if hidden {
+                demand
+            } else {
+                demand.max(hidden_before.unwrap_or(0))
+            };
+            let waited_ms = now.saturating_sub(start);
+            if waited_ms < threshold_ms {
+                return None;
             }
-            Some(since) => {
-                let (at, cause) = last_frame.filter(|&(at, _)| at >= since)?;
-                self.since = None;
-                Some(Stall::Ended {
-                    after_ms: at - since,
+            self.watch = Some(Watch { demand, start, hidden });
+            return Some(if hidden {
+                Stall::Hidden {
+                    since: demand,
+                    waited_ms,
+                }
+            } else {
+                Stall::Began {
+                    since: demand,
+                    waited_ms,
+                }
+            });
+        };
+        if let Some((at, cause)) = first_frame.filter(|&(at, _)| at >= watch.demand) {
+            self.watch = None;
+            return Some(if watch.hidden {
+                Stall::HiddenEnded {
+                    after_ms: at.saturating_sub(watch.demand),
+                    cause,
+                }
+            } else {
+                Stall::Ended {
+                    after_ms: at.saturating_sub(watch.start),
                     cause,
                     resumed_after_ms: last_resume
-                        .filter(|&resume| resume >= since && resume <= at)
-                        .map(|resume| resume - since),
-                })
+                        .filter(|&resume| resume >= watch.start && resume <= at)
+                        .map(|resume| resume - watch.start),
+                }
+            });
+        }
+        // Окно снова видно, а кадра всё нет: пауза — от последнего тика, когда оно было скрыто.
+        if watch.hidden && !hidden {
+            let start = hidden_before.unwrap_or(watch.demand).max(watch.demand);
+            let waited_ms = now.saturating_sub(start);
+            if waited_ms >= threshold_ms {
+                self.watch = Some(Watch {
+                    start,
+                    hidden: false,
+                    ..watch
+                });
+                return Some(Stall::Began {
+                    since: watch.demand,
+                    waited_ms,
+                });
             }
         }
+        None
     }
 }
 
@@ -225,54 +284,151 @@ mod tests {
     }
 
     #[test]
-    fn pets_stall_begins_only_after_threshold_and_ends_on_frame() {
+    fn pets_stall_begins_only_after_threshold_and_ends_on_first_frame() {
         let mut tracker = StallTracker::default();
         let t = 500;
-        assert_eq!(tracker.tick(100, None, None, None, t), None, "no demand");
-        assert_eq!(tracker.tick(599, Some(100), None, None, t), None, "below threshold");
+        assert_eq!(tracker.tick(100, None, None, None, false, t), None, "no demand");
         assert_eq!(
-            tracker.tick(600, Some(100), None, None, t),
-            Some(Stall::Began { waited_ms: 500 })
+            tracker.tick(599, Some(100), None, None, false, t),
+            None,
+            "below threshold"
         );
-        assert_eq!(tracker.tick(900, Some(100), None, None, t), None, "written once");
+        assert_eq!(
+            tracker.tick(600, Some(100), None, None, false, t),
+            Some(Stall::Began {
+                since: 100,
+                waited_ms: 500
+            })
+        );
+        assert_eq!(tracker.tick(900, Some(100), None, None, false, t), None, "written once");
         let old_frame = Some((50, FrameCause::MetalCallback));
         assert_eq!(
-            tracker.tick(950, Some(100), old_frame, None, t),
+            tracker.tick(950, Some(100), old_frame, None, false, t),
             None,
             "frame before demand"
         );
         assert_eq!(
-            tracker.tick(8_000, None, Some((7_700, FrameCause::DisplayLayer)), Some(7_600), t),
+            tracker.tick(
+                8_000,
+                None,
+                Some((7_700, FrameCause::DisplayLayer)),
+                Some(7_600),
+                false,
+                t
+            ),
             Some(Stall::Ended {
                 after_ms: 7_600,
                 cause: FrameCause::DisplayLayer,
-                resumed_after_ms: Some(7_500),
+                resumed_after_ms: Some(7_500)
             })
         );
-        assert_eq!(tracker.tick(8_100, None, None, None, t), None, "idle after the stall");
+        assert_eq!(
+            tracker.tick(8_100, None, None, None, false, t),
+            None,
+            "idle after the stall"
+        );
     }
 
     #[test]
     fn pets_stall_ignores_resume_outside_the_stall() {
         let mut tracker = StallTracker::default();
         let t = 500;
-        tracker.tick(1_000, Some(500), None, None, t);
+        tracker.tick(1_000, Some(500), None, None, false, t);
         assert_eq!(
-            tracker.tick(1_250, Some(1_100), Some((1_100, FrameCause::CvCallback)), Some(10), t),
+            tracker.tick(
+                1_250,
+                Some(1_100),
+                Some((1_100, FrameCause::CvCallback)),
+                Some(10),
+                false,
+                t
+            ),
             Some(Stall::Ended {
                 after_ms: 600,
                 cause: FrameCause::CvCallback,
-                resumed_after_ms: None,
+                resumed_after_ms: None
             })
         );
         assert_eq!(
-            tracker.tick(1_500, Some(1_100), None, None, t),
+            tracker.tick(1_500, Some(1_100), None, None, false, t),
             None,
             "new demand counts from its own start"
         );
         assert_eq!(
-            tracker.tick(1_600, Some(1_100), None, None, t),
-            Some(Stall::Began { waited_ms: 500 })
+            tracker.tick(1_600, Some(1_100), None, None, false, t),
+            Some(Stall::Began {
+                since: 1_100,
+                waited_ms: 500
+            })
+        );
+    }
+
+    #[test]
+    fn pets_hidden_window_demand_is_not_a_stall() {
+        let mut tracker = StallTracker::default();
+        let t = 500;
+        assert_eq!(
+            tracker.tick(600, Some(0), None, None, true, t),
+            Some(Stall::Hidden {
+                since: 0,
+                waited_ms: 600
+            })
+        );
+        assert_eq!(tracker.tick(5_000, Some(0), None, None, true, t), None, "written once");
+        assert_eq!(
+            tracker.tick(5_250, None, Some((5_040, FrameCause::MetalCallback)), None, false, t),
+            Some(Stall::HiddenEnded {
+                after_ms: 5_040,
+                cause: FrameCause::MetalCallback
+            })
+        );
+    }
+
+    #[test]
+    fn pets_stall_after_window_shows_counts_from_visibility() {
+        let mut tracker = StallTracker::default();
+        let t = 500;
+        tracker.tick(600, Some(0), None, None, true, t);
+        tracker.tick(1_000, Some(0), None, None, true, t);
+        assert_eq!(
+            tracker.tick(1_250, Some(0), None, None, false, t),
+            None,
+            "shown 250 ms ago"
+        );
+        assert_eq!(
+            tracker.tick(1_500, Some(0), None, None, false, t),
+            Some(Stall::Began {
+                since: 0,
+                waited_ms: 500
+            })
+        );
+        assert_eq!(
+            tracker.tick(9_000, None, Some((8_000, FrameCause::DisplayLayer)), None, false, t),
+            Some(Stall::Ended {
+                after_ms: 7_000,
+                cause: FrameCause::DisplayLayer,
+                resumed_after_ms: None
+            })
+        );
+    }
+
+    #[test]
+    fn pets_demand_right_after_hiding_counts_from_visibility() {
+        let mut tracker = StallTracker::default();
+        let t = 500;
+        tracker.tick(250, None, None, None, true, t);
+        tracker.tick(500, None, None, None, true, t);
+        assert_eq!(
+            tracker.tick(750, Some(400), None, None, false, t),
+            None,
+            "visible only since t=500"
+        );
+        assert_eq!(
+            tracker.tick(1_000, Some(400), None, None, false, t),
+            Some(Stall::Began {
+                since: 400,
+                waited_ms: 500
+            })
         );
     }
 

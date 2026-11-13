@@ -507,8 +507,10 @@ impl WindowDiag {
             | display_sync as u8
             | (presents_with_transaction as u8) << 1
             | (allows_timeout as u8) << 2;
-        let changed = self.layer_max_drawables.swap(max_drawables, Relaxed) != max_drawables
-            || self.layer_flags.swap(flags, Relaxed) != flags;
+        // Оба обмена — до сравнения: иначе при первом чтении флаги остались бы пустыми.
+        let max_changed = self.layer_max_drawables.swap(max_drawables, Relaxed) != max_drawables;
+        let flags_changed = self.layer_flags.swap(flags, Relaxed) != flags;
+        let changed = max_changed || flags_changed;
         if changed {
             frames_event!(Debug, self.id, "layer: {}", self.layer_summary());
         }
@@ -620,6 +622,20 @@ impl WindowDiag {
         (at != NONE).then_some((at, cause))
     }
 
+    /// Окно не видно: перекрыто, на другом Space или свёрнуто (по последнему чтению AppKit).
+    fn hidden(&self) -> bool {
+        WindowFlags::unpack(self.flags.load(Relaxed)).is_some_and(|flags| {
+            !flags.occlusion_visible || !flags.on_active_space || flags.is_miniaturized
+        })
+    }
+
+    fn flags_summary(&self) -> String {
+        match WindowFlags::unpack(self.flags.load(Relaxed)) {
+            Some(flags) => format!("{flags} (as of t={}ms)", self.flags_at.load(Relaxed)),
+            None => String::from("not read yet"),
+        }
+    }
+
     fn demand_since(&self) -> Option<u64> {
         let since = self.demand_since.load(Relaxed);
         (since != NONE).then_some(since)
@@ -676,11 +692,29 @@ fn watchdog() {
                 window.demand_since(),
                 window.stall_end(),
                 window.last_resume(),
+                window.hidden(),
                 STALL_THRESHOLD_MS,
             );
             match change {
-                Some(Stall::Began { waited_ms }) => {
-                    window.mark_stalled(now.saturating_sub(waited_ms));
+                Some(Stall::Hidden { since, waited_ms }) => {
+                    window.mark_stalled(since);
+                    frames_event!(
+                        Debug,
+                        window.id,
+                        "frame demand while hidden: gpui waits {waited_ms} ms; window: {}",
+                        window.flags_summary()
+                    );
+                }
+                Some(Stall::HiddenEnded { after_ms, cause }) => {
+                    frames_event!(
+                        Debug,
+                        window.id,
+                        "frame demand while hidden ended after {after_ms} ms: first frame by {}",
+                        cause.name()
+                    );
+                }
+                Some(Stall::Began { since, waited_ms }) => {
+                    window.mark_stalled(since);
                     at_stall.insert(
                         window.id,
                         (
