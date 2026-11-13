@@ -7,6 +7,9 @@
 mod display;
 mod display_link;
 mod events;
+// Pets patch: диагностика кадров (GMAC-01).
+mod frames_diag;
+mod frames_logic;
 mod keyboard;
 mod pasteboard;
 mod system_notifications;

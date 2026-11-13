@@ -14,7 +14,30 @@ gpui-pre-macos = { git = "https://github.com/Dicobraz/pets", rev = "<комми�
 | Патч | Файлы | Upstream |
 |---|---|---|
 | Кадры — от CVDisplayLink, как в 0.3.9 (gpui-kit 0.7.3); `CAMetalDisplayLink` (macOS 14+) — только по `GPUI_METAL_DISPLAY_LINK=1` (раз за процесс). Окно на 0.3.12 переставало получать кадры на 7–44 с при спросе на них (Postman, снимки macOS CI: 0.7.3 — 17/17 без пауз, 0.9.1 — 4/6 с паузами) | `src/window.rs`, `src/gpui_macos.rs` | кандидат (отчёт ниже) |
-| Диагностика кадров (DEBUG, цель `gpui_macos::frames`): пауза Metal-ссылки, отсоединение, пропуск старта у невидимого окна, пробуждение без живой ссылки | `src/display_link.rs`, `src/window.rs` | — |
+| Диагностика кадров (GMAC-01, цель `gpui_macos::frames`, сторож пауз) — см. ниже | `src/frames_diag.rs`, `src/frames_logic.rs`, `src/display_link.rs`, `src/window.rs`, `src/platform.rs` | — |
+
+## Диагностика кадров
+
+Выключена по умолчанию; включается, если `GPUI_FRAMES_WATCHDOG=1` или цель `gpui_macos::frames` открыта на debug
+(решается раз за процесс). Выключена — окна не заводят записи, потока сторожа нет.
+
+- Запись: `t=<мс от запуска> w<окно>` (`w0` — приложение). DEBUG — смены состояния, TRACE — каждый кадр и пробуждение.
+- Metal-путь: каждый `wake()` с исходом (`resumed`, `link running`, `deferred to end_frame`, `no link (detached)`,
+  `link busy`), каждый `end_frame` (рисовал, предъявил, спрос gpui, решение о паузе), `start_display_link` /
+  `stop_display_link` с причиной, каждый колбэк ссылки. CVDisplayLink-путь — колбэки, слитые тики, пропуски.
+- `displayLayer:`, `viewDidChangeBackingProperties`, `windowDidChangeScreen`, `windowDidChangeOcclusionState`,
+  ключевое окно, свёртывание, видимость (`occlusionState`, `isVisible`, `isKeyWindow`, `isMiniaturized`,
+  `isOnActiveSpace`, `maximumFramesPerSecond` экрана); активация приложения, сон и пробуждение экранов и системы,
+  смена Space; `thermalState` и `isLowPowerModeEnabled`.
+- Сторож — поток раз в 250 мс: gpui ждёт кадра (`schedule_frame` или пробуждение после последнего кадра) дольше
+  500 мс — WARN `frame stall` со снимком (ссылка, видимость, экран, питание, App Nap, ~64 последних события);
+  кадр пришёл — WARN `frame stall ended after N ms` и чем закончилось (`displayLayer:`, колбэк, пробуждение).
+  Только пишет, ничего не чинит. «Грязное окно / `on_next_frame`» платформе не видно: спрос — это вызовы
+  `schedule_frame` и waker'а, которые gpui делает ровно при этих условиях.
+- При первом окне — INFO: версия macOS, `hw.model`, экраны с частотой, выбранный путь кадров.
+
+Прогон с Metal-путём: `GPUI_METAL_DISPLAY_LINK=1 GPUI_FRAMES_WATCHDOG=1 POSTMAN_LOG=info,gpui_macos::frames=trace`.
+Чистая логика (кольцо, порог сторожа) — `src/frames_logic.rs`, её тесты идут в `pets-gpui-macos` на любой ОС.
 
 ## Почему CVDisplayLink, а не правка Metal-пути
 

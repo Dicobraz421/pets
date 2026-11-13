@@ -155,6 +155,11 @@ unsafe fn build_classes() {
                 sel!(onSystemWake:),
                 on_system_wake as extern "C-unwind" fn(_, Sel, *mut AnyObject),
             );
+            // Pets patch: диагностика кадров (GMAC-01).
+            decl.add_method(
+                sel!(petsFramesNotification:),
+                pets_frames_notification as extern "C-unwind" fn(_, Sel, *mut AnyObject),
+            );
 
             decl.register()
         }
@@ -1331,6 +1336,10 @@ extern "C-unwind" fn did_finish_launching(this: &AnyObject, _: Sel, _: *mut AnyO
             name: ns_string("NSApplicationDidChangeScreenParametersNotification"),
             object: ptr::null_mut::<AnyObject>()
         ];
+        // Pets patch: диагностика кадров — активация, сон, Space (только когда она включена).
+        if crate::frames_diag::enabled() {
+            register_pets_frames_observers(this);
+        }
         let platform = get_mac_platform(this);
         let callback = {
             let mut state = platform.0.lock();
@@ -1346,6 +1355,51 @@ extern "C-unwind" fn did_finish_launching(this: &AnyObject, _: Sel, _: *mut AnyO
             callback();
         }
     }
+}
+
+/// Pets patch: `observer` — делегат приложения с `petsFramesNotification:` (см. `build_classes`).
+fn register_pets_frames_observers(observer: &AnyObject) {
+    const APP: [&str; 5] = [
+        "NSApplicationDidBecomeActiveNotification",
+        "NSApplicationDidResignActiveNotification",
+        "NSApplicationDidHideNotification",
+        "NSApplicationDidUnhideNotification",
+        "NSApplicationDidChangeScreenParametersNotification",
+    ];
+    const WORKSPACE: [&str; 7] = [
+        "NSWorkspaceScreensDidSleepNotification",
+        "NSWorkspaceScreensDidWakeNotification",
+        "NSWorkspaceWillSleepNotification",
+        "NSWorkspaceDidWakeNotification",
+        "NSWorkspaceActiveSpaceDidChangeNotification",
+        "NSWorkspaceSessionDidBecomeActiveNotification",
+        "NSWorkspaceSessionDidResignActiveNotification",
+    ];
+    // SAFETY: селектор объявлен у класса делегата с сигнатурой обработчика уведомления; имена —
+    // строковые значения констант AppKit.
+    unsafe {
+        let app_center: *mut AnyObject = msg_send![class!(NSNotificationCenter), defaultCenter];
+        let workspace: *mut AnyObject = msg_send![class!(NSWorkspace), sharedWorkspace];
+        let workspace_center: *mut AnyObject = msg_send![workspace, notificationCenter];
+        for (center, names) in [(app_center, &APP[..]), (workspace_center, &WORKSPACE[..])] {
+            for name in names {
+                let _: () = msg_send![center, addObserver: observer,
+                    selector: sel!(petsFramesNotification:),
+                    name: ns_string(name),
+                    object: ptr::null_mut::<AnyObject>()
+                ];
+            }
+        }
+    }
+}
+
+extern "C-unwind" fn pets_frames_notification(_: &AnyObject, _: Sel, notification: *mut AnyObject) {
+    // SAFETY: AppKit передаёт NSNotification; `name` — NSString.
+    let name = unsafe {
+        let name: *mut AnyObject = msg_send![notification, name];
+        crate::NSStringExt::to_str(&name).to_owned()
+    };
+    crate::pets_frames_app_notification(&name);
 }
 
 /// `observer` must be the app delegate, whose class declares `onSystemSleep:`

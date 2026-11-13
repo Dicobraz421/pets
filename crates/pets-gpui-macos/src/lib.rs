@@ -20,3 +20,10 @@ pub mod drag;
 pub mod toast;
 #[cfg(target_os = "macos")]
 pub mod window;
+
+// GMAC-01: чистая логика диагностики кадров форка `pets-gpui-macos-platform` (кольцо событий, порог сторожа) —
+// её тесты идут на любой ОС здесь: сам форк вне рабочей области и собирается только на macOS.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../pets-gpui-macos-platform/src/frames_logic.rs"]
+mod frames_logic;
