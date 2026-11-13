@@ -2,6 +2,13 @@
 
 Новое решение — сверху, с датой.
 
+## 2026-11-13. macOS: форк gpui-pre-macos — кадры от CVDisplayLink (GMAC-01)
+
+Владелец через оркестратора (блокер беты v0.1.0-beta.6; класс B согласован 2026-10-26): `crates/pets-gpui-macos-platform`
+— снимок `gpui-pre-macos` 0.3.12 (crates.io), подмена `[patch.crates-io]` (и в `pets`), полоса `gpui-macos`.
+Кадры — от CVDisplayLink, как в gpui-kit 0.7.3; `CAMetalDisplayLink` 0.3.12 оставлял окно без кадров на 7–44 с.
+Вернуть — `GPUI_METAL_DISPLAY_LINK=1`. Публичный API крейта не меняется; потребитель — Postman (macOS).
+
 ## 2026-11-13. Перетаскивание из окна: копия с меткой «из Интернета» (PAR-07, аудит Postman №11)
 
 Владелец (класс B согласован в чате 2026-10-26). `gpui_windows::pets`: файл с копией (`DragFile::with_copy`) отдаётся

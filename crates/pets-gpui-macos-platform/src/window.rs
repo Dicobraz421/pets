@@ -1108,7 +1108,12 @@ impl MacWindow {
             let native_view: *mut AnyObject = msg_send![native_view, initWithFrame: content_bounds];
             assert!(!native_view.is_null());
 
-            let metal_frames = MetalFrameSource::is_available().then(Rc::<MetalFrames>::default);
+            // Pets patch: кадры — от CVDisplayLink, как до 0.3.12. `CAMetalDisplayLink` (macOS 14+)
+            // ставится на паузу после «пустого» кадра и отсоединяется при перекрытии окна; окно
+            // переставало получать кадры на 7–44 с при спросе на них (Postman, снимки macOS CI).
+            // Вернуть Metal-ссылку — `GPUI_METAL_DISPLAY_LINK=1`.
+            let metal_frames = (crate::pets_metal_display_link() && MetalFrameSource::is_available())
+                .then(Rc::<MetalFrames>::default);
             let state = Rc::new(Mutex::new(MacWindowState {
                 handle,
                 foreground_executor,
