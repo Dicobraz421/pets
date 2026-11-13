@@ -324,6 +324,13 @@ impl MetalFrames {
             && let Some(source) = source.as_ref()
         {
             source.set_paused(false);
+        } else {
+            // Pets patch: диагностика — пробуждение, которое не дошло до ссылки.
+            log::debug!(
+                target: "gpui_macos::frames",
+                "wake without a live CAMetalDisplayLink (attached: {:?})",
+                self.source.try_borrow().map(|source| source.is_some()).ok()
+            );
         }
     }
 
@@ -336,6 +343,8 @@ impl MetalFrames {
     pub fn end_frame(&self, used_drawable: bool) -> bool {
         let pause = !used_drawable && !self.woken.get();
         if pause && let Some(source) = self.source.borrow().as_ref() {
+            // Pets patch: диагностика.
+            log::debug!(target: "gpui_macos::frames", "CAMetalDisplayLink paused: idle update");
             source.set_paused(true);
         }
         pause

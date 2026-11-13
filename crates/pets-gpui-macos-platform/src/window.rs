@@ -833,6 +833,8 @@ impl MacWindowState {
             .occlusionState()
             .contains(NSWindowOcclusionState::Visible)
         {
+            // Pets patch: диагностика.
+            log::debug!(target: "gpui_macos::frames", "display link not started: window not visible");
             return;
         }
         match &mut self.frame_source {
@@ -874,6 +876,8 @@ impl MacWindowState {
                 if metal_frames.is_attached() {
                     // Detach the link rather than pause it, so that a synchronous
                     // draw can use the layer's `nextDrawable`.
+                    // Pets patch: диагностика.
+                    log::debug!(target: "gpui_macos::frames", "CAMetalDisplayLink detached");
                     metal_frames.replace(None);
                     self.renderer.set_display_link_attached(false);
                 }
