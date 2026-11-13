@@ -304,7 +304,12 @@ impl WindowsPlatform {
             .read()
             .iter()
             .for_each(|handle| unsafe {
-                PostMessageW(Some(handle.as_raw()), message, wparam, lparam).log_err();
+                // Pets patch: a window that is being destroyed is still listed until
+                // `WM_GPUI_CLOSE_ONE_WINDOW` — not an error.
+                log_hwnd_err(
+                    PostMessageW(Some(handle.as_raw()), message, wparam, lparam),
+                    handle.as_raw(),
+                );
             });
     }
 
@@ -497,9 +502,12 @@ impl WindowsPlatform {
                                     hwnd.frame_signal.take();
                                 }
                             }
-                            RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE)
-                                .ok()
-                                .log_err();
+                            // Pets patch: the window may be destroyed between the list
+                            // read and this call (closed, app shutting down) — not an error.
+                            log_hwnd_err(
+                                RedrawWindow(Some(hwnd.as_raw()), None, None, RDW_INVALIDATE).ok(),
+                                hwnd.as_raw(),
+                            );
                         }
                     }
                 }

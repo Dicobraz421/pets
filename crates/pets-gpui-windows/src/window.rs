@@ -54,6 +54,9 @@ pub struct WindowsWindowState {
     pub restore_from_minimized: Cell<Option<Box<dyn FnMut(RequestFrameOptions)>>>,
     /// Pets patch: окно скрыто DWM (cloak) до первого кадра — без чёрной вспышки на старте.
     pub cloaked: Cell<bool>,
+    /// Pets patch: `WM_DESTROY` пришёл — HWND уже уничтожен (закрыл человек или система);
+    /// `Drop` не прячет и не уничтожает его повторно.
+    pub destroyed: Cell<bool>,
 
     pub callbacks: Callbacks,
     pub frame_signal: Arc<PlatformFrameSignal>,
@@ -178,6 +181,7 @@ impl WindowsWindowState {
             scale_factor: Cell::new(scale_factor),
             restore_from_minimized: Cell::new(restore_from_minimized),
             cloaked: Cell::new(false),
+            destroyed: Cell::new(false),
             min_size,
             callbacks,
             frame_signal: Arc::new(PlatformFrameSignal::new()),
@@ -425,6 +429,40 @@ pub(crate) struct Callbacks {
     pub(crate) appearance_changed: Cell<Option<Box<dyn FnMut()>>>,
 }
 
+impl Callbacks {
+    /// Pets patch: окно gpui уже удалено из `App` — колбэки ему больше некуда доставить
+    /// (`handle.update` даёт `window not found` уровня ERROR). Сообщения, пришедшие окну
+    /// между `Drop` и `DestroyWindow` (скрытие, деактивация, перерисовка), идут мимо.
+    pub(crate) fn release(&self) {
+        let Self {
+            request_frame,
+            input,
+            active_status_change,
+            visibility_change,
+            hovered_status_change,
+            resize,
+            moved,
+            display_changed,
+            should_close,
+            close,
+            hit_test_window_control,
+            appearance_changed,
+        } = self;
+        request_frame.take();
+        input.take();
+        active_status_change.take();
+        visibility_change.take();
+        hovered_status_change.take();
+        resize.take();
+        moved.take();
+        display_changed.take();
+        should_close.take();
+        close.take();
+        hit_test_window_control.take();
+        appearance_changed.take();
+    }
+}
+
 struct WindowCreateContext {
     inner: Option<Result<Rc<WindowsWindowInner>>>,
     handle: AnyWindowHandle,
@@ -631,21 +669,32 @@ impl rwh::HasDisplayHandle for WindowsWindow {
 impl Drop for WindowsWindow {
     fn drop(&mut self) {
         self.0.dialog_owner.close();
-        unsafe { ShowWindowAsync(self.0.hwnd, SW_HIDE).ok().log_err() };
-        // `DestroyWindow` below sends `WM_SHOWWINDOW`; without a callback the
-        // resulting visibility report has nothing to notify.
-        self.0.state.callbacks.visibility_change.take();
+        // Pets patch: the gpui window is already removed from the app. Messages that still
+        // reach this HWND (hide, deactivation, `WM_SHOWWINDOW` from `DestroyWindow`) must not
+        // call into it — that logs `window not found` at ERROR on every close.
+        self.0.state.callbacks.release();
+        self.0.state.restore_from_minimized.take();
+        // Pets patch: closed by the user or the system — the HWND is already destroyed
+        // (`WM_DESTROY` revoked drag-drop); hiding or destroying it again only fails.
+        if !self.0.state.destroyed.get() {
+            log_hwnd_err(
+                unsafe { ShowWindowAsync(self.0.hwnd, SW_HIDE).ok() },
+                self.0.hwnd,
+            );
+        }
         // clone this `Rc` to prevent early release of the pointer
         let this = self.0.clone();
         self.0
             .executor
             .spawn(async move {
                 this.dialog_owner.when_idle().await;
-                let handle = this.hwnd;
-                unsafe {
-                    RevokeDragDrop(handle).log_err();
-                    DestroyWindow(handle).log_err();
+                // A callback running during `Drop` puts itself back when it returns.
+                this.state.callbacks.release();
+                if this.state.destroyed.get() {
+                    return;
                 }
+                let handle = this.hwnd;
+                log_hwnd_err(unsafe { DestroyWindow(handle) }, handle);
             })
             .detach();
     }
