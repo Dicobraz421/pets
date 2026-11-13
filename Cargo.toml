@@ -7,6 +7,7 @@ exclude = [
     "crates/pets-gpui-base",
     "crates/pets-gpui-linux",
     "crates/pets-gpui-wgpu",
+    "crates/pets-gpui-macos-platform",
 ]
 
 [workspace.package]
@@ -41,6 +42,7 @@ panic = "deny"
 gpui-pre-windows = { path = "crates/pets-gpui-windows" }
 gpui-pre-linux = { path = "crates/pets-gpui-linux" }
 gpui-pre-wgpu = { path = "crates/pets-gpui-wgpu" }
+gpui-pre-macos = { path = "crates/pets-gpui-macos-platform" }
 
 # Гигиена диска (H-01): номера строк в стектрейсах, PDB в разы меньше; без символов у зависимостей.
 [profile.dev]
