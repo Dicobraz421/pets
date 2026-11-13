@@ -2,6 +2,15 @@
 
 Новое решение — сверху, с датой.
 
+## 2026-11-13. macOS: значок в строке меню (Postman MAC-08)
+
+Владелец (Postman #656, волна MAC — класс B, согласована): аналог значка в трее Windows — `NSStatusItem` в
+`NSStatusBar.systemStatusBar`. API добавлено, прежнее не менялось: `pets_gpui_macos::status_item::StatusItem::new(image,
+tip, on_menu)` — картинка любого формата `NSImage` (PDF, PNG), рисуется шаблоном (`isTemplate`) 18×18 точек;
+`set_count(Option<u32>)` (0 и `None` — только значок), `set_title(Option<&str>)`, `set_tip`, `set_menu(&[Item])`
+(`Item::Command(u32, String)` / `Separator`, как у `gpui_windows::pets::tray`); щелчок по пункту — `on_menu(номер)` в
+главном потоке. Только главный поток; `Drop` убирает значок.
+
 ## 2026-11-13. macOS: форк gpui-pre-macos — кадры от CVDisplayLink (GMAC-01)
 
 Владелец через оркестратора (блокер беты v0.1.0-beta.6; класс B согласован 2026-10-26): `crates/pets-gpui-macos-platform`
