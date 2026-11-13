@@ -15,7 +15,9 @@
   Файл с неверной подписью удаляется и не запускается.
 - **Установка.** MSI — `msiexec /i <файл> /passive /norestart`; portable — замена файлов рядом с exe с откатом;
   бандл macOS (`InstallKind::AppBundle`) — `.app` из `.zip` заменяет старый бандл целиком, с откатом. Потом
-  программа запускается снова (бандл — через `open`).
+  программа запускается снова (бандл — через `open`). Linux: AppImage (`InstallKind::AppImage`) — новый
+  `.AppImage` пишется рядом со старым во временный файл, `chmod 755`, атомарная замена переименованием; пакеты
+  deb/rpm не ставятся (нужен root) — продукт предлагает скачать файл.
 - **Выключатели.** Настройка выключена — фоновых запросов нет, кнопка «Проверить» работает. Политика
   `AllowUpdate = 0` — запросов нет вообще.
 
@@ -84,6 +86,11 @@ updater.install(verified, InstallPlan::restart_current()?)?;
   старый в запас и ставит новый; не встал — запас возвращается. Права файлов (бит запуска) и ссылки внутри бандла
   сохраняются, `__MACOSX/` пропускается. Нужна запись в папку бандла (`/Applications` — у администратора есть);
   нет — `install` вернёт ошибку до выхода программы. `app_bundle(exe)` — бандл, где лежит exe (`None` — не в бандле).
+- Linux: вид установки — `InstallKind::current_linux()`: задан `$APPIMAGE` → `AppImage`; exe под `/usr` → `Deb`
+  (есть `dpkg`) или `Rpm` (есть `rpm`); иначе `None` — обновление не предлагать. `InstallPlan::restart_current()`
+  в AppImage берёт путь `$APPIMAGE`; помощник — копия самого образа. Нужна запись в папку образа; нет — `install`
+  вернёт ошибку до выхода программы. `kind.can_install() == false` (deb/rpm) — показать «Доступна версия X» и ссылку
+  «Скачать» на `update.asset_url`, как при отказе `install` в праве записи; `install` для них — `Err(Invalid)`.
 - MSI: постоянный `UpgradeCode` и `MajorUpgrade`, установка в ту же папку. Пакет «для всех» сам покажет запрос UAC.
 - Тесты продукта: `Updater::with_parts(product, kind, dir, policy, Box::new(подменная_сеть))`.
 
@@ -109,7 +116,9 @@ updater.install(verified, InstallPlan::restart_current()?)?;
 |---|---|
 | `<prefix>-<версия>-windows-<arch>.msi` | установщик; `arch` — `x64` или `arm64` |
 | `<prefix>-<версия>-windows-<arch>.zip` | portable, файлы в архиве лежат сразу, без вложенной папки |
-| `<артефакт>.minisig` | подпись каждого `.msi` и `.zip` |
+| `<prefix>-<версия>-linux-<arch>.AppImage` | AppImage, ставится обновлением |
+| `<prefix>-<версия>-linux-<arch>.deb`, `.rpm` | пакеты: только ссылка «Скачать» |
+| `<артефакт>.minisig` | подпись каждого `.msi`, `.zip`, `.AppImage`, `.deb`, `.rpm` |
 
 Тег выпуска — `v<версия>`, версия — semver; версия с дефисом — предварительный выпуск (бета-канал). Имя файла
 должно совпадать с этим шаблоном буква в букву: по нему ищется артефакт и к нему привязана подпись. Выпуск, в
@@ -147,7 +156,8 @@ minisign -G -W -p pets-update.pub -s pets-update.key
           (umask 077; printf '%s\n' "$UPDATE_SIGNING_KEY" > "$key")
           trap 'rm -f "$key"' EXIT
           cd assets
-          for f in *.msi *.zip; do
+          shopt -s nullglob                          # вида нет в выпуске — пропустить
+          for f in *.msi *.zip *.AppImage *.deb *.rpm; do
             minisign -S -s "$key" -m "$f"            # пишет $f.minisig; в подписи — file:$f
             minisign -V -P "$UPDATE_PUBLIC_KEY" -m "$f"
           done

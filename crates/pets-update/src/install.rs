@@ -7,7 +7,8 @@
 //! 1. ждёт выхода программы (конец потока stdin, который держала программа);
 //! 2. заново проверяет подпись и держит файл закрытым от записи до конца установки;
 //! 3. MSI — `msiexec /i <файл> /passive /norestart`; portable — распаковка и замена файлов рядом с exe с откатом;
-//!    бандл macOS — распаковка рядом и замена `.app` целиком с откатом;
+//!    бандл macOS — распаковка рядом и замена `.app` целиком с откатом; AppImage — запись рядом во временный файл,
+//!    `chmod +x` и атомарная замена переименованием (не встал — старый файл не тронут);
 //! 4. пишет итог (`result.json`), убирает скачанное и запускает программу снова.
 //!
 //! При следующем старте продукт читает итог через [`take_result`].
@@ -50,10 +51,16 @@ pub struct InstallPlan {
 }
 
 impl InstallPlan {
-    /// Перезапустить текущий exe без аргументов.
+    /// Перезапустить текущую программу без аргументов: свой exe, а в AppImage — файл `$APPIMAGE` (exe лежит в
+    /// смонтированном образе, который исчезнет с выходом программы).
     pub fn restart_current() -> Result<InstallPlan, UpdateError> {
+        let appimage = std::env::var_os("APPIMAGE").filter(|p| cfg!(target_os = "linux") && !p.is_empty());
+        let app_exe = match appimage {
+            Some(path) => PathBuf::from(path),
+            None => std::env::current_exe().map_err(io_err("find own exe"))?,
+        };
         Ok(InstallPlan {
-            app_exe: std::env::current_exe().map_err(io_err("find own exe"))?,
+            app_exe,
             restart_args: Vec::new(),
             keep: Vec::new(),
         })
@@ -91,11 +98,17 @@ impl Updater {
     /// его выхода, ставит обновление и запускает программу снова. Ничего не ставится, пока программа работает.
     pub fn install(&self, verified: Verified, plan: InstallPlan) -> Result<(), UpdateError> {
         let downloaded = &verified.downloaded;
+        if !downloaded.update.kind.can_install() {
+            return Err(UpdateError::Invalid(
+                "system package is installed by the package manager",
+            ));
+        }
         // Проверка до закрытия программы: в папку без права записи обновление не поставить. Бандл заменяется
         // переименованием — нужна запись в папку, где он лежит (`/Applications`).
         let writable = match downloaded.update.kind {
-            InstallKind::Msi => None,
-            InstallKind::Portable => Some(
+            InstallKind::Msi | InstallKind::Deb | InstallKind::Rpm => None,
+            // AppImage заменяется переименованием в своей папке.
+            InstallKind::Portable | InstallKind::AppImage => Some(
                 plan.app_exe
                     .parent()
                     .ok_or(UpdateError::Invalid("app exe has no folder"))?
@@ -127,7 +140,13 @@ impl Updater {
         fs::write(&job_path, serde_json::to_vec(&job)?).map_err(io_err("write update job"))?;
 
         let helper = self.dir.join(helper_name(&self.product));
-        let own = std::env::current_exe().map_err(io_err("find own exe"))?;
+        // AppImage: свой exe — внутри смонтированного образа и без его библиотек не запустится; помощник — копия
+        // самого образа (`$APPIMAGE`), права копия сохраняет.
+        let own = if job.kind == InstallKind::AppImage {
+            job.app_exe.clone()
+        } else {
+            std::env::current_exe().map_err(io_err("find own exe"))?
+        };
         fs::copy(&own, &helper).map_err(io_err("copy update helper"))?;
 
         let mut command = Command::new(&helper);
@@ -212,7 +231,15 @@ fn restart(job: &Job) -> std::io::Result<std::process::Child> {
         }
         return open.spawn();
     }
-    Command::new(&job.app_exe).args(&job.restart_args).spawn()
+    let mut command = Command::new(&job.app_exe);
+    command.args(&job.restart_args);
+    if job.kind == InstallKind::AppImage {
+        // Переменные образа помощника: среда AppImage задаёт их заново для нового образа.
+        for var in ["APPIMAGE", "APPDIR", "ARGV0", "OWD"] {
+            command.env_remove(var);
+        }
+    }
+    command.spawn()
 }
 
 /// Прочитать и убрать итог последней установки и копию exe-помощника. Продукт зовёт при старте.
@@ -250,7 +277,57 @@ fn apply(keys: &[&str], job: &Job, msi: &mut dyn FnMut(&Path) -> Result<i32, Upd
                 .ok_or(UpdateError::Invalid("app exe has no name"))?;
             apply_bundle(&mut payload, &bundle, Path::new(exe), RENAME_ATTEMPTS)
         }
+        InstallKind::AppImage => apply_appimage(&mut payload, &job.app_exe, RENAME_ATTEMPTS),
+        InstallKind::Deb | InstallKind::Rpm => Err(UpdateError::Invalid(
+            "system package is installed by the package manager",
+        )),
     }
+}
+
+/// Заменить файл AppImage новым: проверенное содержимое пишется рядом (тот же том) во временный файл, ему
+/// ставится бит запуска (`0o755`), затем одно переименование поверх старого — атомарно, старый или новый целиком.
+/// Не встало — временный файл удаляется, старый остаётся как был.
+fn apply_appimage(payload: impl Read, target: &Path, attempts: u32) -> Result<(), UpdateError> {
+    let parent = target.parent().ok_or(UpdateError::Invalid("AppImage has no folder"))?;
+    let name = target
+        .file_name()
+        .ok_or(UpdateError::Invalid("AppImage has no name"))?
+        .to_string_lossy();
+    let temp = parent.join(format!(".{name}{STAGING_DIR}"));
+    let placed = write_executable(payload, &temp)
+        .and_then(|()| rename_retry(&temp, target, attempts).map_err(io_err("place new AppImage")));
+    if placed.is_err() {
+        tracing::warn!("update: AppImage replace failed, old file kept");
+        let _ = fs::remove_file(&temp);
+    }
+    placed
+}
+
+/// Записать содержимое в новый файл `path` (прежний — удалить) с правами `0o755` и сбросить на диск.
+fn write_executable(mut payload: impl Read, path: &Path) -> Result<(), UpdateError> {
+    let what = "write new AppImage";
+    if let Err(e) = fs::remove_file(path)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        return Err(io_err(what)(e));
+    }
+    let mut options = fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o755);
+    }
+    let mut file = options.open(path).map_err(io_err(what))?;
+    std::io::copy(&mut payload, &mut file).map_err(io_err(what))?;
+    // `mode` при создании урезается umask — бит запуска ставится явно.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        file.set_permissions(fs::Permissions::from_mode(0o755))
+            .map_err(io_err(what))?;
+    }
+    file.sync_all().map_err(io_err(what))
 }
 
 /// `msiexec /i <файл> /passive /norestart`: полоса хода без вопросов; запрос UAC покажет сам установщик.
