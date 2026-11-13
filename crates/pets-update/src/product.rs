@@ -74,6 +74,15 @@ pub enum InstallKind {
     /// macOS: программа — бандл `<Имя>.app` ([`app_bundle`]); скачивается `.zip` с ним (`ditto`, рядом может лежать
     /// `README.txt`), бандл заменяется целиком с откатом.
     AppBundle,
+    /// Linux: программа — один файл `.AppImage` (`$APPIMAGE`); скачивается новый `.AppImage` и атомарно заменяет
+    /// старый переименованием.
+    #[serde(rename = "appimage")]
+    AppImage,
+    /// Linux: пакет `.deb`. Ставит менеджер пакетов от root — крейт не устанавливает, продукт даёт ссылку «Скачать»
+    /// ([`Update::asset_url`](crate::Update::asset_url)); [`can_install`](Self::can_install) — `false`.
+    Deb,
+    /// Linux: пакет `.rpm` — как [`Deb`](Self::Deb).
+    Rpm,
 }
 
 impl InstallKind {
@@ -86,11 +95,48 @@ impl InstallKind {
         }
     }
 
+    /// Вид установки на Linux: задан `$APPIMAGE` (`appimage`) — [`AppImage`](Self::AppImage); exe под `<root>/usr` —
+    /// пакет: [`Deb`](Self::Deb), если в системе есть `dpkg`, иначе [`Rpm`](Self::Rpm), если есть `rpm`. Иначе
+    /// (сборка из исходников, неизвестная система пакетов) — `None`: обновлять нечем. `root` — корень ФС (`/`).
+    pub fn detect_linux(appimage: Option<&Path>, exe: &Path, root: &Path) -> Option<InstallKind> {
+        if appimage.is_some_and(|p| !p.as_os_str().is_empty()) {
+            return Some(InstallKind::AppImage);
+        }
+        if !exe.starts_with(root.join("usr")) {
+            return None;
+        }
+        if root.join("usr/bin/dpkg").exists() {
+            Some(InstallKind::Deb)
+        } else if root.join("usr/bin/rpm").exists() {
+            Some(InstallKind::Rpm)
+        } else {
+            None
+        }
+    }
+
+    /// [`detect_linux`](Self::detect_linux) для запущенной программы: `$APPIMAGE`, свой exe, корень `/`.
+    pub fn current_linux() -> Option<InstallKind> {
+        let appimage = std::env::var_os("APPIMAGE").map(PathBuf::from);
+        let exe = std::env::current_exe().ok()?;
+        let kind = InstallKind::detect_linux(appimage.as_deref(), &exe, Path::new("/"));
+        tracing::debug!(?kind, "update: install kind detected");
+        kind
+    }
+
+    /// Может ли крейт сам поставить обновление. `false` — пакеты deb/rpm: продукт показывает «Доступна версия X» и
+    /// ссылку «Скачать» на [`Update::asset_url`](crate::Update::asset_url).
+    pub fn can_install(self) -> bool {
+        !matches!(self, InstallKind::Deb | InstallKind::Rpm)
+    }
+
     /// Расширение артефакта без точки.
     pub fn extension(self) -> &'static str {
         match self {
             InstallKind::Msi => "msi",
             InstallKind::Portable | InstallKind::AppBundle => "zip",
+            InstallKind::AppImage => "AppImage",
+            InstallKind::Deb => "deb",
+            InstallKind::Rpm => "rpm",
         }
     }
 }
@@ -105,8 +151,55 @@ pub fn app_bundle(exe: &Path) -> Option<PathBuf> {
 }
 
 impl Product {
-    /// Имя артефакта выпуска: `<prefix>-<версия>-<os>-<arch>.<msi|zip>` ([`OS`], [`ARCH`]).
+    /// Имя артефакта выпуска: `<prefix>-<версия>-<os>-<arch>.<msi|zip|AppImage|deb|rpm>` ([`OS`], [`ARCH`]).
     pub fn asset_name(&self, version: &Version, kind: InstallKind) -> String {
         format!("{}-{version}-{OS}-{ARCH}.{}", self.asset_prefix, kind.extension())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn linux_kind_is_detected() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let exe = root.join("usr/bin/postman");
+        let home = root.join("home/u/postman");
+        let appimage = root.join("home/u/Postman.AppImage");
+        assert_eq!(
+            InstallKind::detect_linux(Some(&appimage), &exe, root),
+            Some(InstallKind::AppImage)
+        );
+        assert_eq!(InstallKind::detect_linux(Some(Path::new("")), &home, root), None);
+        assert_eq!(InstallKind::detect_linux(None, &exe, root), None);
+        std::fs::create_dir_all(root.join("usr/bin")).unwrap();
+        std::fs::write(root.join("usr/bin/rpm"), b"").unwrap();
+        assert_eq!(InstallKind::detect_linux(None, &exe, root), Some(InstallKind::Rpm));
+        std::fs::write(root.join("usr/bin/dpkg"), b"").unwrap();
+        assert_eq!(InstallKind::detect_linux(None, &exe, root), Some(InstallKind::Deb));
+        assert_eq!(InstallKind::detect_linux(None, &home, root), None);
+    }
+
+    #[test]
+    fn linux_asset_names() {
+        let product = Product {
+            name: "Postman",
+            repo: "owner/postman",
+            asset_prefix: "postman",
+            current: Version::new(1, 0, 0),
+            public_keys: &[],
+        };
+        let v = Version::new(1, 2, 0);
+        for (kind, ext, installs) in [
+            (InstallKind::AppImage, "AppImage", true),
+            (InstallKind::Deb, "deb", false),
+            (InstallKind::Rpm, "rpm", false),
+        ] {
+            assert_eq!(product.asset_name(&v, kind), format!("postman-1.2.0-{OS}-{ARCH}.{ext}"));
+            assert_eq!(kind.can_install(), installs);
+        }
+        assert_eq!(serde_json::to_string(&InstallKind::AppImage).unwrap(), "\"appimage\"");
     }
 }
