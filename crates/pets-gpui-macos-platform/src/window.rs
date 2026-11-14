@@ -4,6 +4,10 @@ use crate::{
     kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
     ns_string, renderer,
 };
+// Pets patch: диагностика кадров (GMAC-01).
+use crate::frames_diag::{
+    self, FrameCause, FramePath, LinkState, WakeSource, WindowDiag, WindowFlags, frames_event,
+};
 use anyhow::Result;
 use block2::RcBlock;
 use dispatch2::DispatchQueue;
@@ -58,7 +62,7 @@ use parking_lot::Mutex;
 use raw_window_handle as rwh;
 use smallvec::SmallVec;
 use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     ffi::{CStr, CString, c_void},
     mem,
     ops::Range,
@@ -454,6 +458,15 @@ unsafe fn build_window_class(name: &CStr, superclass: &AnyClass) -> *const AnyCl
             sel!(windowDidChangeScreen:),
             window_did_change_screen as extern "C" fn(_, Sel, *mut AnyObject),
         );
+        // Pets patch: диагностика кадров — свёртывание окна.
+        decl.add_method(
+            sel!(windowDidMiniaturize:),
+            pets_frames_window_notification as extern "C" fn(_, Sel, *mut AnyObject),
+        );
+        decl.add_method(
+            sel!(windowDidDeminiaturize:),
+            pets_frames_window_notification as extern "C" fn(_, Sel, *mut AnyObject),
+        );
         decl.add_method(
             sel!(windowDidBecomeKey:),
             window_did_change_key_status as extern "C" fn(_, Sel, *mut AnyObject),
@@ -658,6 +671,8 @@ struct MacWindowState {
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
     frame_source: FrameSource,
+    /// Pets patch: диагностика кадров окна (`None` — выключена).
+    diag: Option<Arc<WindowDiag>>,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -826,20 +841,35 @@ impl MacWindowState {
 
     /// `window_state` is the handle this state lives in; a Metal link holds it
     /// weakly to deliver frames.
-    fn start_display_link(&mut self, window_state: &Rc<Mutex<MacWindowState>>) {
-        self.stop_display_link();
+    /// Pets patch: `reason` — для диагностики кадров.
+    fn start_display_link(&mut self, window_state: &Rc<Mutex<MacWindowState>>, reason: &str) {
+        self.stop_display_link(reason);
+        let diag = self.diag.clone();
         if !self
             .native_window()
             .occlusionState()
             .contains(NSWindowOcclusionState::Visible)
         {
-            // Pets patch: диагностика.
-            log::debug!(target: "gpui_macos::frames", "display link not started: window not visible");
+            if let Some(diag) = &diag {
+                pets_frames_refresh(self);
+                frames_event!(
+                    Debug,
+                    diag.id,
+                    "start_display_link({reason}): SKIPPED, occlusionState not visible"
+                );
+            }
             return;
         }
         match &mut self.frame_source {
             FrameSource::Metal(metal_frames) => {
                 let Some(layer) = self.renderer.layer() else {
+                    if let Some(diag) = &diag {
+                        frames_event!(
+                            Debug,
+                            diag.id,
+                            "start_display_link({reason}): SKIPPED, no layer"
+                        );
+                    }
                     return;
                 };
                 let main_thread =
@@ -850,40 +880,93 @@ impl MacWindowState {
                         metal_frame(&window_state, update);
                     }
                 });
+                let started = source.is_some();
                 if let Some(source) = source {
                     metal_frames.replace(Some(source));
                     self.renderer.set_display_link_attached(true);
+                }
+                if let Some(diag) = &diag {
+                    pets_frames_layer(diag, &self.renderer);
+                    if started {
+                        diag.set_link(LinkState::Running);
+                        frames_event!(
+                            Debug,
+                            diag.id,
+                            "start_display_link({reason}): CAMetalDisplayLink attached"
+                        );
+                    } else {
+                        frames_event!(
+                            Debug,
+                            diag.id,
+                            "start_display_link({reason}): MetalFrameSource::new returned None"
+                        );
+                    }
                 }
             }
             FrameSource::DisplayLink(frame_source) => {
                 let screen: *mut AnyObject = unsafe { msg_send![self.native_window, screen] };
                 let Some(display_id) = display_id_for_screen(screen) else {
                     // AppKit can temporarily report no screen while displays are being reconfigured.
+                    if let Some(diag) = &diag {
+                        frames_event!(
+                            Debug,
+                            diag.id,
+                            "start_display_link({reason}): SKIPPED, no screen"
+                        );
+                    }
                     return;
                 };
                 let data = self.native_view.as_ptr() as *mut c_void;
-                frame_source
-                    .get_or_insert_with(|| WindowFrameSource::new(data, step))
+                let ticks = diag.as_ref().map(|diag| diag.cv_ticks.clone());
+                let started = frame_source
+                    .get_or_insert_with(|| WindowFrameSource::new(data, step, ticks))
                     .start(display_id)
-                    .log_err();
+                    .log_err()
+                    .is_some();
+                if let Some(diag) = &diag {
+                    pets_frames_layer(diag, &self.renderer);
+                    if started {
+                        diag.set_link(LinkState::Running);
+                    }
+                    frames_event!(
+                        Debug,
+                        diag.id,
+                        "start_display_link({reason}): CVDisplayLink subscribe display={display_id} ok={}",
+                        started as u8
+                    );
+                }
             }
         }
     }
 
-    fn stop_display_link(&mut self) {
-        match &mut self.frame_source {
+    /// Pets patch: `reason` — для диагностики кадров.
+    fn stop_display_link(&mut self, reason: &str) {
+        let diag = self.diag.clone();
+        let stopped = match &mut self.frame_source {
             FrameSource::Metal(metal_frames) => {
-                if metal_frames.is_attached() {
+                let attached = metal_frames.is_attached();
+                if attached {
                     // Detach the link rather than pause it, so that a synchronous
                     // draw can use the layer's `nextDrawable`.
-                    // Pets patch: диагностика.
-                    log::debug!(target: "gpui_macos::frames", "CAMetalDisplayLink detached");
                     metal_frames.replace(None);
                     self.renderer.set_display_link_attached(false);
                 }
+                attached.then_some("CAMetalDisplayLink detached")
             }
-            FrameSource::DisplayLink(Some(frame_source)) => frame_source.stop(),
-            FrameSource::DisplayLink(None) => {}
+            FrameSource::DisplayLink(Some(frame_source)) => {
+                frame_source.stop();
+                Some("CVDisplayLink unsubscribed")
+            }
+            FrameSource::DisplayLink(None) => None,
+        };
+        if let Some(diag) = &diag {
+            match stopped {
+                Some(what) => {
+                    diag.set_link(LinkState::Detached);
+                    frames_event!(Debug, diag.id, "stop_display_link({reason}): {what}");
+                }
+                None => frames_event!(Trace, diag.id, "stop_display_link({reason}): no link"),
+            }
         }
     }
 
@@ -983,6 +1066,8 @@ pub(crate) struct MacWindow(
     /// The Metal link's frame waker, kept outside the lock so waking never
     /// waits on it. `None` when a `CVDisplayLink` paces frames.
     Option<Rc<MetalFrames>>,
+    /// Pets patch: диагностика кадров окна (`None` — выключена), вне блокировки.
+    Option<Arc<WindowDiag>>,
 );
 
 impl MacWindow {
@@ -1112,12 +1197,16 @@ impl MacWindow {
             let native_view: *mut AnyObject = msg_send![native_view, initWithFrame: content_bounds];
             assert!(!native_view.is_null());
 
-            // Pets patch: кадры — от CVDisplayLink, как до 0.3.12. `CAMetalDisplayLink` (macOS 14+)
-            // ставится на паузу после «пустого» кадра и отсоединяется при перекрытии окна; окно
-            // переставало получать кадры на 7–44 с при спросе на них (Postman, снимки macOS CI).
-            // Вернуть Metal-ссылку — `GPUI_METAL_DISPLAY_LINK=1`.
-            let metal_frames = (crate::pets_metal_display_link() && MetalFrameSource::is_available())
-                .then(Rc::<MetalFrames>::default);
+            // Pets patch: как в исходнике — `CAMetalDisplayLink` на macOS 14+, иначе CVDisplayLink;
+            // аварийный откат на CVDisplayLink — `GPUI_CV_DISPLAY_LINK=1`.
+            let metal_path = !crate::pets_cv_display_link() && MetalFrameSource::is_available();
+            let diag = WindowDiag::new(if metal_path {
+                FramePath::Metal
+            } else {
+                FramePath::CvDisplayLink
+            });
+            pets_frames_startup_info(marker, metal_path);
+            let metal_frames = metal_path.then(|| Rc::new(MetalFrames::new(diag.clone())));
             let state = Rc::new(Mutex::new(MacWindowState {
                 handle,
                 foreground_executor,
@@ -1132,6 +1221,7 @@ impl MacWindow {
                     Some(metal_frames) => FrameSource::Metal(metal_frames.clone()),
                     None => FrameSource::DisplayLink(None),
                 },
+                diag: diag.clone(),
                 renderer,
                 request_frame_callback: None,
                 event_callback: None,
@@ -1175,7 +1265,7 @@ impl MacWindow {
                 accesskit_adapter: None,
                 sheet_parent: None,
             }));
-            let mut window = Self(state, marker, metal_frames);
+            let mut window = Self(state, marker, metal_frames, diag);
 
             (*native_window)
                 .class()
@@ -1190,6 +1280,7 @@ impl MacWindow {
                 .expect("GPUI view state ivar")
                 .load_ptr::<*mut c_void>(&*native_view)
                 .write(Rc::into_raw(window.0.clone()).cast_mut().cast());
+            pets_frames_window_opened(&window.0);
 
             if let Some(title) = titlebar
                 .as_ref()
@@ -1418,6 +1509,9 @@ impl Drop for MacWindow {
         // the adapter here so the native view, its `CAMetalLayer` and the
         // renderer's command queue are actually released with the window.
         drop(this.accesskit_adapter.take());
+        if let Some(diag) = &this.diag {
+            frames_event!(Debug, diag.id, "window dropped");
+        }
         this.renderer.destroy();
         let window = this.native_window;
         let sheet_parent = this.sheet_parent.take();
@@ -2153,15 +2247,30 @@ impl PlatformWindow for MacWindow {
     }
 
     fn draw(&self, scene: &gpui::Scene) {
+        if let Some(diag) = &self.3 {
+            diag.drew();
+        }
         let mut this = self.0.lock();
-        this.renderer.draw(scene);
+        match &self.3 {
+            // Pets patch: без drawable от ссылки рендерер ждёт `nextDrawable` — замер.
+            Some(diag) if !diag.draws_from_link() => {
+                pets_frames_layer(diag, &this.renderer);
+                let start = std::time::Instant::now();
+                this.renderer.draw(scene);
+                diag.next_drawable_draw(start.elapsed());
+            }
+            _ => this.renderer.draw(scene),
+        }
     }
 
     // GPUI calls this without waking the frame waker when a window only needs
     // a present, so a paused Metal link must resume here too.
     fn schedule_frame(&self) {
         if let Some(metal_frames) = &self.2 {
-            metal_frames.wake();
+            metal_frames.wake(WakeSource::ScheduleFrame);
+        } else if let Some(diag) = &self.3 {
+            // Pets patch: CVDisplayLink-путь — спрос для сторожа.
+            diag.demand(WakeSource::ScheduleFrame);
         }
     }
 
@@ -2169,7 +2278,7 @@ impl PlatformWindow for MacWindow {
         let metal_frames = Rc::downgrade(self.2.as_ref()?);
         Some(Rc::new(move || {
             if let Some(metal_frames) = metal_frames.upgrade() {
-                metal_frames.wake();
+                metal_frames.wake(WakeSource::Waker);
             }
         }))
     }
@@ -3064,15 +3173,24 @@ fn report_visibility(window_state: &Rc<Mutex<MacWindowState>>) {
 extern "C" fn window_did_change_occlusion_state(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.lock();
-    if lock
+    let visible = lock
         .native_window()
         .occlusionState()
-        .contains(NSWindowOcclusionState::Visible)
-    {
+        .contains(NSWindowOcclusionState::Visible);
+    if let Some(diag) = &lock.diag {
+        frames_event!(
+            Debug,
+            diag.id,
+            "windowDidChangeOcclusionState: {}",
+            if visible { "visible" } else { "not visible" }
+        );
+        pets_frames_refresh(&lock);
+    }
+    if visible {
         lock.move_traffic_light();
-        lock.start_display_link(&window_state);
+        lock.start_display_link(&window_state, "occlusion visible");
     } else {
-        lock.stop_display_link();
+        lock.stop_display_link("occlusion not visible");
     }
     drop(lock);
     // The only visibility source: AppKit posts this for covering, minimizing,
@@ -3199,7 +3317,11 @@ fn update_window_scale_factor(window_state: &Rc<Mutex<MacWindowState>>) {
 extern "C" fn window_did_change_screen(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
-    lock.start_display_link(&window_state);
+    if let Some(diag) = &lock.diag {
+        frames_event!(Debug, diag.id, "windowDidChangeScreen:");
+        pets_frames_refresh(&lock);
+    }
+    lock.start_display_link(&window_state, "windowDidChangeScreen");
     drop(lock);
     update_window_scale_factor(&window_state);
     report_display_change(&window_state);
@@ -3228,6 +3350,16 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
     let window_state = unsafe { get_window_state(this) };
     let lock = window_state.lock();
     let is_active = lock.native_window().isKeyWindow();
+    if let Some(diag) = &lock.diag {
+        frames_event!(
+            Debug,
+            diag.id,
+            "{}: isKeyWindow={}",
+            selector.name().to_str().unwrap_or("key status"),
+            is_active as u8
+        );
+        pets_frames_refresh(&lock);
+    }
 
     // AppKit also unhides the cursor on activation changes, so mirror that here.
     lock.cursor_visible.store(true, Ordering::Relaxed);
@@ -3276,18 +3408,23 @@ extern "C" fn window_did_change_key_status(this: &AnyObject, selector: Sel, _: *
         if lock.activated_least_once {
             if let Some(mut callback) = lock.request_frame_callback.take() {
                 lock.renderer.set_presents_with_transaction(true);
-                lock.stop_display_link();
+                lock.stop_display_link("becomeKey sync frame");
+                let diag = lock.diag.clone();
                 drop(lock);
+                if let Some(diag) = &diag {
+                    diag.frame_begin(FrameCause::BecomeKey);
+                }
                 callback(RequestFrameOptions {
                     signal_at,
                     signal_source: FrameRequestSource::NativeCallback,
                     ..Default::default()
                 });
+                pets_frames_sync_frame_end(diag.as_deref(), "becomeKey sync frame");
 
                 let mut lock = window_state.lock();
                 lock.request_frame_callback = Some(callback);
                 lock.renderer.set_presents_with_transaction(false);
-                lock.start_display_link(&window_state);
+                lock.start_display_link(&window_state, "becomeKey sync frame done");
             }
         } else {
             lock.activated_least_once = true;
@@ -3355,6 +3492,18 @@ extern "C" fn make_backing_layer(this: &AnyObject, _: Sel) -> *mut AnyObject {
 
 extern "C" fn view_did_change_backing_properties(this: &AnyObject, _: Sel) {
     let window_state = unsafe { get_window_state(this) };
+    {
+        let lock = window_state.lock();
+        if let Some(diag) = &lock.diag {
+            frames_event!(
+                Debug,
+                diag.id,
+                "viewDidChangeBackingProperties: scale={}",
+                lock.scale_factor()
+            );
+            pets_frames_refresh(&lock);
+        }
+    }
     update_window_scale_factor(&window_state);
 }
 
@@ -3400,20 +3549,31 @@ extern "C" fn display_layer(this: &AnyObject, _: Sel, _: *mut AnyObject) {
     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.lock();
+    let diag = lock.diag.clone();
+    if let Some(diag) = &diag {
+        frames_event!(Debug, diag.id, "displayLayer:");
+        pets_frames_refresh(&lock);
+    }
     if let Some(mut callback) = lock.request_frame_callback.take() {
         lock.renderer.set_presents_with_transaction(true);
-        lock.stop_display_link();
+        lock.stop_display_link("displayLayer sync frame");
         drop(lock);
+        if let Some(diag) = &diag {
+            diag.frame_begin(FrameCause::DisplayLayer);
+        }
         callback(RequestFrameOptions {
             signal_at,
             signal_source: FrameRequestSource::NativeCallback,
             ..Default::default()
         });
+        pets_frames_sync_frame_end(diag.as_deref(), "displayLayer sync frame");
 
         let mut lock = window_state.lock();
         lock.request_frame_callback = Some(callback);
         lock.renderer.set_presents_with_transaction(false);
-        lock.start_display_link(&window_state);
+        lock.start_display_link(&window_state, "displayLayer done");
+    } else if let Some(diag) = &diag {
+        frames_event!(Debug, diag.id, "displayLayer: SKIPPED, frame callback busy");
     }
 }
 
@@ -3421,6 +3581,9 @@ extern "C" fn step(view: *mut c_void) {
     let view = view as *mut AnyObject;
     let window_state = unsafe { get_window_state(&*view) };
     let mut lock = window_state.lock();
+    let diag = lock.diag.clone();
+    // Pets patch: тики CVDisplayLink с прошлого вызова (больше 1 — слились).
+    let ticks = diag.as_ref().map_or(0, |diag| diag.take_cv_ticks());
 
     if let Some(mut callback) = lock.request_frame_callback.take() {
         let signal = match &lock.frame_source {
@@ -3432,12 +3595,32 @@ extern "C" fn step(view: *mut c_void) {
             |(at, source)| (Some(at), source),
         );
         drop(lock);
+        if let Some(diag) = &diag {
+            diag.frame_begin(FrameCause::CvCallback);
+        }
         callback(RequestFrameOptions {
             signal_at,
             signal_source,
             ..Default::default()
         });
+        if let Some(diag) = &diag {
+            let summary = diag.frame_end();
+            frames_event!(
+                Trace,
+                diag.id,
+                "cvdisplaylink callback: ticks={ticks} drew={} gpui_demand={} (schedule_frame x{})",
+                summary.drew as u8,
+                summary.demand() as u8,
+                summary.schedule_frames
+            );
+        }
         window_state.lock().request_frame_callback = Some(callback);
+    } else if let Some(diag) = &diag {
+        frames_event!(
+            Debug,
+            diag.id,
+            "cvdisplaylink callback SKIPPED: frame callback busy (ticks={ticks})"
+        );
     }
 }
 
@@ -3451,10 +3634,26 @@ fn metal_frame(
         return;
     };
     let metal_frames = metal_frames.clone();
+    // Pets patch: диагностика кадров — каждый колбэк ссылки.
+    if let Some(diag) = &lock.diag {
+        diag.metal_callback(update.targetPresentationTimestamp());
+    }
     let Some(mut callback) = lock.request_frame_callback.take() else {
+        if let Some(diag) = &lock.diag {
+            frames_event!(
+                Debug,
+                diag.id,
+                "metal link callback SKIPPED: frame callback busy"
+            );
+        }
         return;
     };
-    lock.renderer.set_frame_drawable(Some(update.drawable()));
+    let drawable = update.drawable();
+    if let Some(diag) = &lock.diag {
+        // SAFETY: CAMetalDrawable — объект Objective-C.
+        diag.drawable_issued(unsafe { &*Retained::as_ptr(&drawable).cast::<AnyObject>() });
+    }
+    lock.renderer.set_frame_drawable(Some(drawable));
     drop(lock);
     metal_frames.begin_frame();
     callback(RequestFrameOptions {
@@ -3467,7 +3666,191 @@ fn metal_frame(
     // A frame with nothing to draw leaves its drawable unused; releasing it
     // lets the link hand it out again.
     let used_drawable = lock.renderer.set_frame_drawable(None).is_none();
+    if !used_drawable && let Some(diag) = &lock.diag {
+        diag.drawable_unused();
+    }
     metal_frames.end_frame(used_drawable);
+}
+
+// Pets patch: диагностика кадров (GMAC-01) — видимость окна, уведомления, строка запуска.
+
+thread_local! {
+    /// Окна для обновления видимости по уведомлениям приложения (главный поток).
+    static PETS_FRAMES_WINDOWS: RefCell<Vec<Weak<Mutex<MacWindowState>>>> =
+        const { RefCell::new(Vec::new()) };
+}
+
+/// Свежая видимость окна по AppKit — в диагностику (главный поток).
+fn pets_frames_refresh(state: &MacWindowState) {
+    let Some(diag) = &state.diag else {
+        return;
+    };
+    let window = state.native_window();
+    let flags = WindowFlags {
+        occlusion_visible: window
+            .occlusionState()
+            .contains(NSWindowOcclusionState::Visible),
+        is_visible: window.isVisible(),
+        is_key: window.isKeyWindow(),
+        is_miniaturized: window.isMiniaturized(),
+        on_active_space: window.isOnActiveSpace(),
+    };
+    let (display, fps) = window.screen().map_or((0, 0), |screen| {
+        (
+            display_id_for_screen(pets_screen_ptr(&screen)).unwrap_or(0),
+            screen.maximumFramesPerSecond().max(0) as u32,
+        )
+    });
+    diag.set_window(flags, display, fps);
+}
+
+/// Свойства слоя, от которых зависит выдача drawable.
+fn pets_frames_layer(diag: &WindowDiag, renderer: &renderer::Renderer) {
+    let Some(layer) = renderer.layer() else {
+        return;
+    };
+    // SAFETY: свойства CAMetalLayer (macOS 10.13+), только чтение.
+    let (max, sync, transaction, timeout) = unsafe {
+        let max: NSUInteger = msg_send![layer, maximumDrawableCount];
+        let sync: Bool = msg_send![layer, displaySyncEnabled];
+        let transaction: Bool = msg_send![layer, presentsWithTransaction];
+        let timeout: Bool = msg_send![layer, allowsNextDrawableTimeout];
+        (max, sync, transaction, timeout)
+    };
+    diag.set_layer(
+        max as u32,
+        sync.as_bool(),
+        transaction.as_bool(),
+        timeout.as_bool(),
+    );
+}
+
+fn pets_screen_ptr(screen: &NSScreen) -> *mut AnyObject {
+    screen as *const NSScreen as *mut AnyObject
+}
+
+fn pets_frames_window_opened(window_state: &Rc<Mutex<MacWindowState>>) {
+    let lock = window_state.lock();
+    let Some(diag) = &lock.diag else {
+        return;
+    };
+    frames_event!(
+        Debug,
+        diag.id,
+        "window opened: windowNumber={} path={:?}",
+        lock.native_window().windowNumber(),
+        diag.path
+    );
+    pets_frames_refresh(&lock);
+    drop(lock);
+    PETS_FRAMES_WINDOWS.with_borrow_mut(|windows| {
+        windows.retain(|window| window.strong_count() > 0);
+        windows.push(Rc::downgrade(window_state));
+    });
+}
+
+/// Кадр вне ссылки (`displayLayer:`, `windowDidBecomeKey:`) закончился.
+fn pets_frames_sync_frame_end(diag: Option<&WindowDiag>, what: &str) {
+    if let Some(diag) = diag {
+        let summary = diag.frame_end();
+        frames_event!(
+            Debug,
+            diag.id,
+            "{what}: drew={} gpui_demand={} (schedule_frame x{}, waker x{})",
+            summary.drew as u8,
+            summary.demand() as u8,
+            summary.schedule_frames,
+            summary.wakes
+        );
+    }
+}
+
+/// Уведомление приложения (активация, сон, Space) — запись и свежая видимость окон.
+pub(crate) fn pets_frames_app_notification(name: &str) {
+    frames_diag::app_notification(name);
+    PETS_FRAMES_WINDOWS.with_borrow_mut(|windows| {
+        windows.retain(|window| window.strong_count() > 0);
+        for window in windows.iter() {
+            if let Some(state) = window.upgrade()
+                && let Some(lock) = state.try_lock()
+                && !lock.closed.load(Ordering::Acquire)
+            {
+                pets_frames_refresh(&lock);
+            }
+        }
+    });
+}
+
+extern "C" fn pets_frames_window_notification(this: &AnyObject, selector: Sel, _: *mut AnyObject) {
+    let window_state = unsafe { get_window_state(this) };
+    let lock = window_state.lock();
+    if let Some(diag) = &lock.diag {
+        frames_event!(
+            Debug,
+            diag.id,
+            "{}",
+            selector.name().to_str().unwrap_or("window notification")
+        );
+        pets_frames_refresh(&lock);
+    }
+}
+
+/// Одна INFO-строка при первом окне: macOS, модель, экраны, путь кадров.
+fn pets_frames_startup_info(main_thread: MainThreadMarker, metal_path: bool) {
+    static ONCE: Once = Once::new();
+    if !log::log_enabled!(target: frames_diag::TARGET, log::Level::Info) && !frames_diag::enabled()
+    {
+        return;
+    }
+    ONCE.call_once(|| {
+        let os = NSProcessInfo::processInfo()
+            .operatingSystemVersionString()
+            .to_string();
+        let screens = NSScreen::screens(main_thread)
+            .iter()
+            .map(|screen| {
+                format!(
+                    "{} \"{}\" {}Hz x{}",
+                    display_id_for_screen(pets_screen_ptr(&screen)).unwrap_or(0),
+                    screen.localizedName(),
+                    screen.maximumFramesPerSecond(),
+                    screen.backingScaleFactor()
+                )
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        let path = if metal_path {
+            "CAMetalDisplayLink"
+        } else if crate::pets_cv_display_link() {
+            "CVDisplayLink (GPUI_CV_DISPLAY_LINK=1)"
+        } else {
+            "CVDisplayLink (CAMetalDisplayLink unavailable: macOS 13)"
+        };
+        let app_sleep_disabled: bool = unsafe {
+            let defaults: *mut AnyObject = msg_send![class!(NSUserDefaults), standardUserDefaults];
+            let value: Bool = msg_send![defaults, boolForKey: ns_string("NSAppSleepDisabled")];
+            value.as_bool()
+        };
+        let active = objc2_app_kit::NSApplication::sharedApplication(main_thread).isActive();
+        frames_diag::set_app_sleep_disabled(app_sleep_disabled);
+        frames_diag::set_app_active(active);
+        let t0_unix_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |since| since.as_millis() as u64)
+            .saturating_sub(frames_diag::now_ms());
+        log::info!(
+            target: frames_diag::TARGET,
+            "t={}ms frames: macOS {os}; hw.model={}; screens: [{screens}]; frame source: {path}; \
+             diagnostics={} (GPUI_FRAMES_WATCHDOG=1 or gpui_macos::frames=debug); {}; \
+             NSAppSleepDisabled={}; app active={}; t=0 is unix {t0_unix_ms} ms",
+            frames_diag::now_ms(),
+            frames_diag::hw_model(),
+            if frames_diag::enabled() { "on" } else { "off" },
+            frames_diag::power_summary(),
+            app_sleep_disabled as u8,
+            active as u8,
+        );
+    });
 }
 
 extern "C" fn valid_attributes_for_marked_text(_: &AnyObject, _: Sel) -> *mut AnyObject {

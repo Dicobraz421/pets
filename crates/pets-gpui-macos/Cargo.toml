@@ -1,6 +1,6 @@
 [package]
 name = "pets-gpui-macos"
-description = "Платформенный код окна приложений Pets на macOS за нейтральным API (аналог `gpui_windows::pets`): номер и снимок окна, перетаскивание файлов, уведомления центра уведомлений, бейдж на значке в Dock"
+description = "Платформенный код окна приложений Pets на macOS за нейтральным API (аналог `gpui_windows::pets`): номер и снимок окна, перетаскивание файлов, уведомления центра уведомлений, бейдж на значке в Dock, значок в строке меню"
 edition.workspace = true
 version.workspace = true
 license.workspace = true
@@ -16,6 +16,7 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
     "std",
     "NSArray",
     "NSBundle",
+    "NSData",
     "NSEnumerator",
     "NSError",
     "NSGeometry",
@@ -25,7 +26,11 @@ objc2-foundation = { version = "0.3.2", default-features = false, features = [
 ] }
 objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "std",
+    "objc2-core-foundation",
     "NSApplication",
+    "NSButton",
+    "NSCell",
+    "NSControl",
     "NSDockTile",
     "NSDragging",
     "NSDraggingItem",
@@ -33,8 +38,13 @@ objc2-app-kit = { version = "0.3.2", default-features = false, features = [
     "NSEvent",
     "NSGraphics",
     "NSImage",
+    "NSMenu",
+    "NSMenuItem",
     "NSPasteboard",
     "NSResponder",
+    "NSStatusBar",
+    "NSStatusBarButton",
+    "NSStatusItem",
     "NSView",
     "NSWindow",
     "NSWorkspace",

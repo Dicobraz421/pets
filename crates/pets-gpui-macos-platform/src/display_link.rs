@@ -54,6 +54,7 @@
 //! is a std implementation detail, not a guarantee; if it changes, the cost
 //! is added latency under contention, not incorrectness.)
 
+use crate::frames_diag::{self, LinkState, WakeOutcome, WakeSource, WindowDiag, frames_event};
 use crate::main_thread_marker;
 use anyhow::Result;
 use core_graphics::display::CGDirectDisplayID;
@@ -68,7 +69,10 @@ use std::{
     cell::{Cell, RefCell},
     collections::{BTreeMap, btree_map},
     ffi::c_void,
-    sync::{Arc, Mutex, MutexGuard, PoisonError},
+    sync::{
+        Arc, Mutex, MutexGuard, PoisonError,
+        atomic::{AtomicU64, Ordering},
+    },
     time::Duration,
 };
 
@@ -98,6 +102,8 @@ struct DisplayLinkSubscriber {
     id: SubscriberId,
     frame_requests: DispatchRetained<DispatchSource>,
     signal: Arc<PlatformFrameSignal>,
+    /// Pets patch: счётчик тиков для диагностики кадров (`None` — выключена).
+    ticks: Option<Arc<AtomicU64>>,
 }
 
 // SAFETY: Both fields wrapping raw pointers are refcounted handles to
@@ -157,6 +163,9 @@ unsafe extern "C" fn display_link_output_callback(
                     .signal
                     .record(signal_at, FrameRequestSource::NativeCallback);
             }
+            if let Some(ticks) = &subscriber.ticks {
+                ticks.fetch_add(1, Ordering::Relaxed);
+            }
             subscriber.frame_requests.merge_data(1);
         }
     }
@@ -193,6 +202,7 @@ fn subscribe(
     display_id: CGDirectDisplayID,
     frame_requests: DispatchRetained<DispatchSource>,
     signal: Arc<PlatformFrameSignal>,
+    ticks: Option<Arc<AtomicU64>>,
 ) -> Result<SubscriberId> {
     debug_assert_main_thread();
 
@@ -235,6 +245,7 @@ fn subscribe(
             id: subscriber_id,
             frame_requests,
             signal,
+            ticks,
         });
         let link_to_start = if entry.running {
             None
@@ -248,6 +259,10 @@ fn subscribe(
     };
 
     if let Some(mut link) = link_to_start {
+        // Pets patch: диагностика кадров.
+        if frames_diag::enabled() {
+            frames_event!(Debug, 0, "CVDisplayLinkStart display={display_id}");
+        }
         if let Err(error) = unsafe { link.start() } {
             let mut registry = lock_registry();
             if let Some(entry) = registry.displays.get_mut(&display_id) {
@@ -288,6 +303,14 @@ fn unsubscribe(display_id: CGDirectDisplayID, subscriber_id: SubscriberId) {
     };
 
     if let Some(mut link) = link_to_stop {
+        // Pets patch: диагностика кадров.
+        if frames_diag::enabled() {
+            frames_event!(
+                Debug,
+                0,
+                "CVDisplayLinkStop display={display_id}: no subscribers"
+            );
+        }
         // A final output callback can still fire after this returns; it finds
         // no subscribers for this display and does nothing.
         unsafe { link.stop().log_err() };
@@ -306,10 +329,24 @@ pub struct MetalFrames {
     source: RefCell<Option<MetalFrameSource>>,
     /// Whether GPUI asked for a frame since the current update began.
     woken: Cell<bool>,
+    /// Pets patch: диагностика кадров (GMAC-01) — пауза, которую поставил `end_frame`,
+    /// идёт ли кадр и запись окна (`None` — выключена).
+    paused: Cell<bool>,
+    in_update: Cell<bool>,
+    diag: Option<Arc<WindowDiag>>,
 }
 
 impl MetalFrames {
+    /// Pets patch: с диагностикой кадров окна.
+    pub fn new(diag: Option<Arc<WindowDiag>>) -> Self {
+        Self {
+            diag,
+            ..Self::default()
+        }
+    }
+
     pub fn replace(&self, source: Option<MetalFrameSource>) {
+        self.paused.set(false);
         *self.source.borrow_mut() = source;
     }
 
@@ -317,35 +354,81 @@ impl MetalFrames {
         self.source.borrow().is_some()
     }
 
-    pub fn wake(&self) {
+    pub fn wake(&self, source: WakeSource) {
         self.woken.set(true);
         // A source being replaced starts unpaused, so skipping it is safe.
-        if let Ok(source) = self.source.try_borrow()
-            && let Some(source) = source.as_ref()
-        {
-            source.set_paused(false);
-        } else {
-            // Pets patch: диагностика — пробуждение, которое не дошло до ссылки.
-            log::debug!(
-                target: "gpui_macos::frames",
-                "wake without a live CAMetalDisplayLink (attached: {:?})",
-                self.source.try_borrow().map(|source| source.is_some()).ok()
-            );
+        // Pets patch: исход пробуждения — для диагностики кадров.
+        let outcome = match self.source.try_borrow() {
+            Ok(link) => match link.as_ref() {
+                Some(link) => {
+                    link.set_paused(false);
+                    if self.paused.replace(false) {
+                        WakeOutcome::Resumed
+                    } else if self.in_update.get() {
+                        WakeOutcome::Deferred
+                    } else {
+                        WakeOutcome::Running
+                    }
+                }
+                None => WakeOutcome::Detached,
+            },
+            Err(_) => WakeOutcome::Busy,
+        };
+        if let Some(diag) = &self.diag {
+            diag.wake(source, outcome);
         }
     }
 
     pub fn begin_frame(&self) {
         self.woken.set(false);
+        self.in_update.set(true);
+        if let Some(diag) = &self.diag {
+            diag.frame_begin(frames_diag::FrameCause::MetalCallback);
+        }
     }
 
     /// Ends an update, pausing the link if GPUI neither used its drawable nor
     /// asked for another frame while it ran. Returns whether it paused.
     pub fn end_frame(&self, used_drawable: bool) -> bool {
+        self.in_update.set(false);
         let pause = !used_drawable && !self.woken.get();
+        let mut paused = false;
         if pause && let Some(source) = self.source.borrow().as_ref() {
-            // Pets patch: диагностика.
-            log::debug!(target: "gpui_macos::frames", "CAMetalDisplayLink paused: idle update");
             source.set_paused(true);
+            paused = true;
+        }
+        if paused {
+            self.paused.set(true);
+        }
+        // Pets patch: диагностика кадров — итог кадра и решение о паузе.
+        if let Some(diag) = &self.diag {
+            let summary = diag.frame_end();
+            if paused {
+                diag.set_link(LinkState::Paused);
+            }
+            frames_diag::event(
+                if paused {
+                    log::Level::Debug
+                } else {
+                    log::Level::Trace
+                },
+                diag.id,
+                format_args!(
+                    "end_frame: drew={} presented={} gpui_demand={} (schedule_frame x{}, waker x{}) \
+                     woken={} -> {}",
+                    summary.drew as u8,
+                    used_drawable as u8,
+                    summary.demand() as u8,
+                    summary.schedule_frames,
+                    summary.wakes,
+                    self.woken.get() as u8,
+                    match (pause, paused) {
+                        (false, _) => "keep running",
+                        (true, true) => "PAUSE link (idle update)",
+                        (true, false) => "pause skipped: no link",
+                    }
+                ),
+            );
         }
         pause
     }
@@ -358,10 +441,17 @@ pub struct WindowFrameSource {
     frame_requests: DispatchRetained<DispatchSource>,
     registration: Option<(CGDirectDisplayID, SubscriberId)>,
     signal: Arc<PlatformFrameSignal>,
+    /// Pets patch: счётчик тиков для диагностики кадров.
+    ticks: Option<Arc<AtomicU64>>,
 }
 
 impl WindowFrameSource {
-    pub fn new(data: *mut c_void, callback: extern "C" fn(*mut c_void)) -> Self {
+    /// Pets patch: `ticks` — счётчик колбэков CVDisplayLink для диагностики кадров (`None` — выключена).
+    pub fn new(
+        data: *mut c_void,
+        callback: extern "C" fn(*mut c_void),
+        ticks: Option<Arc<AtomicU64>>,
+    ) -> Self {
         let frame_requests = unsafe {
             let frame_requests = DispatchSource::new(
                 &raw const _dispatch_source_type_data_add as *mut _,
@@ -380,13 +470,18 @@ impl WindowFrameSource {
             frame_requests,
             registration: None,
             signal: Arc::new(PlatformFrameSignal::new()),
+            ticks,
         }
     }
 
     pub fn start(&mut self, display_id: CGDirectDisplayID) -> Result<()> {
         self.stop();
-        let subscriber_id =
-            subscribe(display_id, self.frame_requests.clone(), self.signal.clone())?;
+        let subscriber_id = subscribe(
+            display_id,
+            self.frame_requests.clone(),
+            self.signal.clone(),
+            self.ticks.clone(),
+        )?;
         self.registration = Some((display_id, subscriber_id));
         Ok(())
     }
@@ -611,13 +706,13 @@ mod tests {
         );
 
         frames.begin_frame();
-        frames.wake();
+        frames.wake(WakeSource::Waker);
         assert!(
             !frames.end_frame(false),
             "a wake during the update, like a throttled frame's retry, keeps it running"
         );
 
-        frames.wake();
+        frames.wake(WakeSource::Waker);
         frames.begin_frame();
         assert!(
             frames.end_frame(false),
