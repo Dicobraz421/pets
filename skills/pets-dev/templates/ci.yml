@@ -1,12 +1,16 @@
 # Шаблон CI приложения Pets (скилл pets-dev). Подставить <app>, <bin>, шаги release.
-# PR и merge queue: ≤7 мин (fmt+lanes на ubuntu параллельно с clippy+nextest на Windows).
-# Docs-PR: сборка пропускается. Release/размер/smoke/архив/подпись — только main и теги `v*`;
+# PR и merge queue: ≤7 мин (fmt+lanes+py на ubuntu параллельно с clippy+nextest на Windows).
+# Cargo-джобы — только при изменениях Rust-входов (rust-детект); docs-PR — без сборки.
+# Черновик — только дешёвые джобы; полный прогон один раз при `gh pr ready`.
+# Release/размер/smoke/архив/подпись — только main и теги `v*`;
 # тег `v*` — выпуск на GitHub (job `publish`, схема — references/releases.md).
 # Required check в защите main — один: `gate`.
 name: CI
 
 on:
   pull_request:
+    # ready_for_review — полный прогон после `gh pr ready` (по умолчанию не триггерит).
+    types: [opened, synchronize, reopened, ready_for_review]
   merge_group:
   push:
     branches: [main]
@@ -26,6 +30,8 @@ env:
 
 jobs:
   changes:
+    # Черновик: cargo-джобы пропущены, `gate` зелёный (слить черновик нельзя).
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
     outputs:
       rust: ${{ steps.d.outputs.rust }}
@@ -47,7 +53,9 @@ jobs:
           if [ -f lanes.toml ] && [ "$EVENT" = pull_request ]; then
             python3 .github/lane_check.py lanes.toml changed.txt "$HEAD_REF"
           fi
-          if grep -qvE '^(docs/|[^/]*\.md$|.*/README\.md$)' changed.txt; then
+          # Cargo-джобы нужны только при изменениях Rust-входов (крейты, манифесты,
+          # toolchain, assets); docs, scripts и ci-файлы — без cargo.
+          if grep -qE '^(crates/|assets/|fuzz/|Cargo\.(toml|lock)$|\.cargo/|rust-toolchain\.toml$|rustfmt\.toml$|clippy\.toml$|deny\.toml$)' changed.txt; then
             echo rust=true >> "$GITHUB_OUTPUT"
           else
             echo rust=false >> "$GITHUB_OUTPUT"
@@ -142,9 +150,18 @@ jobs:
           gh release create "$GITHUB_REF_NAME" assets/* -R "$GITHUB_REPOSITORY" --verify-tag \
             --title "<App> $version" --notes-file notes.md --generate-notes "${pre[@]}"
 
+  # Дешёвая проверка python-скриптов CI и сгенерируемых индексов: все PR, включая
+  # docs и черновики (секунды). Приложение добавляет сюда свои `--check` генераторов.
+  py:
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m py_compile $(git ls-files '*.py')
+
   # Единственный required check: зелёный, если всё нужное прошло или было пропущено.
   gate:
-    needs: [changes, fmt, test]
+    needs: [changes, py, fmt, test]
     if: always()
     runs-on: ubuntu-latest
     steps:

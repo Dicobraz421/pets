@@ -1,5 +1,6 @@
-# CI pets (скилл pets-dev): PR и merge queue — один прогон, docs-PR без сборки, черновик PR — без сборки
-# (прогон — на `gh pr ready`). Required check — `gate`.
+# CI pets (скилл pets-dev): PR и merge queue — один прогон; docs-, skills- и scripts/ci-файлы
+# без cargo (rust-детект по входам); черновик PR — без сборки (прогон — на `gh pr ready`).
+# Required check — `gate`.
 name: CI
 
 on:
@@ -45,7 +46,9 @@ jobs:
           if [ "$EVENT" = pull_request ]; then
             python3 .github/lane_check.py lanes.toml changed.txt "$HEAD_REF"
           fi
-          if grep -qvE '^(docs/|skills/|[^/]*\.md$|.*/README\.md$)' changed.txt; then
+          # Cargo-джобы нужны только при изменениях Rust-входов; docs, skills и
+          # scripts — без cargo.
+          if grep -qE '^(crates/|Cargo\.(toml|lock)$|rustfmt\.toml$|clippy\.toml$)' changed.txt; then
             echo rust=true >> "$GITHUB_OUTPUT"
           else
             echo rust=false >> "$GITHUB_OUTPUT"
@@ -114,8 +117,17 @@ jobs:
       - name: Тесты
         run: cargo test --target aarch64-apple-darwin -p pets-shell -p pets-gpui-macos -p pets-ui -p pets-update
 
+  # Дешёвая проверка python-скриптов: все PR, включая docs и черновики (секунды).
+  py:
+    name: py (scripts)
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7.0.1
+      - run: python3 -m py_compile $(git ls-files '*.py')
+
   gate:
-    needs: [changes, test, gpui-windows, macos]
+    needs: [changes, py, test, gpui-windows, macos]
     if: always()
     runs-on: ubuntu-latest
     steps:
