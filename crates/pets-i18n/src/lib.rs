@@ -1,14 +1,16 @@
 //! Тексты интерфейса на Fluent. Наборы `.ftl` вшиты в приложение и библиотеки (по набору на язык:
 //! RU, EN), [`I18n`] собирает их в цепочку «выбранный язык → [`FALLBACK`]». Активный язык —
 //! глобальный ([`init`], [`set_language`], [`current`], [`tr!`]), меняется на лету; [`epoch`] — для
-//! сброса кэшей текста. Для тестов приложения: [`check`] (наборы языков согласованы) и
-//! [`raw_strings`] (в коде нет сырых строк интерфейса).
+//! сброса кэшей текста. Для тестов приложения: [`scoped`] (язык одного потока), [`check`] (наборы
+//! языков согласованы) и [`raw_strings`] (в коде нет сырых строк интерфейса).
 //!
 //! Крейт без UI. Изоляция подстановок (U+2068/U+2069) выключена: шрифты gpui рисуют их квадратиками.
 
 mod check;
 mod raw;
 
+use std::cell::RefCell;
+use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, LazyLock, PoisonError, RwLock};
 
@@ -274,8 +276,48 @@ fn activate(resources: Vec<Resource>, lang: &str) -> Vec<Problem> {
     problems
 }
 
-/// Активный язык (снимок).
+thread_local! {
+    /// Языки потока ([`scoped`]): действует последний. Пусто — глобальный язык.
+    static THREAD: RefCell<Vec<Arc<I18n>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Язык `lang` только для текущего потока, пока живёт значок: тесты приложения в одном процессе
+/// включают разные языки и не мешают друг другу. Вложения допустимы — действует последний.
+/// [`epoch`] не меняется, наборы глобального языка — тоже.
+///
+/// Значок привязывается именем: `let _ru = scoped(&TEXTS, "ru");`. `let _ = scoped(..)` гасит язык сразу.
+pub fn scoped(resources: &[&[Resource]], lang: &str) -> Scoped {
+    let flat: Vec<Resource> = resources.iter().flat_map(|set| set.iter().copied()).collect();
+    let (active, problems) = I18n::new(&[&flat], lang);
+    for p in &problems {
+        tracing::warn!(%p, "i18n");
+    }
+    THREAD.with(|t| t.borrow_mut().push(Arc::new(active)));
+    Scoped {
+        thread: PhantomData::<*mut ()>,
+    }
+}
+
+/// Значок языка потока — живёт до конца области, гасить нельзя (`let _ru = scoped(..)`).
+#[must_use = "язык действует, пока значок жив: let _ru = scoped(..)"]
+pub struct Scoped {
+    /// Нельзя унести в другой поток: там он снял бы чужой язык.
+    thread: PhantomData<*mut ()>,
+}
+
+impl Drop for Scoped {
+    fn drop(&mut self) {
+        THREAD.with(|t| {
+            let _ = t.borrow_mut().pop();
+        });
+    }
+}
+
+/// Активный язык (снимок): языка потока нет — глобальный.
 pub fn current() -> Arc<I18n> {
+    if let Some(active) = THREAD.with(|t| t.borrow().last().cloned()) {
+        return active;
+    }
     Arc::clone(&GLOBAL.read().unwrap_or_else(PoisonError::into_inner).active)
 }
 
