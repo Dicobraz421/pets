@@ -200,6 +200,57 @@ fn raw_strings_counts_lines_across_multiline_literals() {
     assert_eq!(raw_strings(src).first().map(|r| r.line), Some(5));
 }
 
+/// Язык потока не виден другим потокам и не зависит от порядка тестов: глобальное состояние не трогает.
+#[test]
+fn scoped_language_is_local_to_its_thread() {
+    let other = std::thread::spawn(|| {
+        let _en = scoped(&[APP, LIB], "en");
+        assert_eq!(tr!("hello"), "Hello");
+    });
+    {
+        let _ru = scoped(&[APP, LIB], "ru");
+        assert_eq!(current().lang(), "ru");
+        assert_eq!(tr!("hello"), "Привет");
+        assert_eq!(tr!("lib-ok"), "Хорошо");
+    }
+    // Значок погашен — снова глобальный язык (каким бы он ни был из других тестов).
+    assert_ne!(current().lang(), "ru");
+    other.join().unwrap();
+
+    let threads: Vec<_> = (0..16)
+        .map(|i| {
+            let lang = if i % 2 == 0 { "ru" } else { "en" };
+            std::thread::spawn(move || {
+                for _ in 0..200 {
+                    let _guard = scoped(&[APP, LIB], lang);
+                    assert_eq!(current().lang(), lang);
+                    assert_eq!(tr!("hello"), if lang == "ru" { "Привет" } else { "Hello" });
+                }
+            })
+        })
+        .collect();
+    for t in threads {
+        t.join().unwrap();
+    }
+}
+
+#[test]
+fn scoped_language_nests_and_the_last_wins() {
+    let _ru = scoped(&[APP, LIB], "ru");
+    {
+        let _en = scoped(&[APP, LIB], "en");
+        assert_eq!(tr!("hello"), "Hello");
+    }
+    assert_eq!(tr!("hello"), "Привет");
+}
+
+#[test]
+fn scoped_language_reports_problems_without_stopping() {
+    let _lang = scoped(&[APP, LIB], "no-such-language");
+    assert_eq!(current().lang(), "en", "незнакомый язык — запасной");
+    assert_eq!(tr!("hello"), "Hello");
+}
+
 /// Единственный тест на глобальное состояние: остальные не трогают его, чтобы не мешать друг другу.
 #[test]
 fn global_language_switches_on_the_fly() {
